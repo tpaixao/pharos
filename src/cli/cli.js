@@ -4,7 +4,7 @@ const { Command } = require('commander')
 const path = require('path')
 const fs = require('fs')
 
-const pharos = require('../index')
+const pharos = require('../lib')
 
 const program = new Command()
 
