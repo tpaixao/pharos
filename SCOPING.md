@@ -6,21 +6,44 @@ Named after the Lighthouse of Alexandria, which stood for 1,500 years as a beaco
 
 ## Scope: Preprints Only (MVP)
 
-### In scope
+> **Update:** The MVP was narrowed during implementation. External ingestion (arXiv/bioRxiv) was dropped to focus on proving the core thesis: a full publish-to-read cycle without a central server. See IMPLEMENTATION.md for rationale.
+
+### In scope (MVP as built)
+- Author-direct publishing via CLI and web UI upload
+- ORCID-verified identity (OAuth 2.0, `/authenticate` scope)
+- Content-addressed storage (BLAKE2b-256) via Hyperdrive v13
+- Distributed metadata index via Hyperbee (replicates to all peers)
+- Local full-text search via SQLite FTS5 (Node built-in `node:sqlite`)
+- P2P replication via Hyperswarm (metadata + blob transfer)
+- Versioning via `previous_version_hash` links
+- Category-based auto-pinning and replication health tracking
+- Web UI: browse, search, read PDFs, upload, view versions
+- Storage management: disk usage reporting, eviction of unpinned papers
+
+### Post-MVP (deferred)
+- External ingestion from arXiv/bioRxiv (bootstrapping mechanism, not core value)
+- Tiered key management (institutional attestation, passkeys, sovereign keys)
+- Institutional pinning as first-class replication mode
+- Bidirectional ORCID linking (write back to ORCID profile)
+- Citation graph extraction and content-addressed linking
+- Distributed gossip-based search across peers
+- Errata, retractions, corrections as appends (never deletions)
+- Peer review (on-archive review as appends)
+
+### Out of scope (entire project)
+- Published journal articles (copyright, licensing barriers)
+- Datasets (different storage profile, different metadata standards)
+- Government datasets (Data Rescue Project is handling this; complementary, not competing)
+
+### Original scope (superseded by MVP as built above)
+The following was the original ingestion-centric scope, preserved for historical context.
+
 - arXiv preprints (metadata + full text PDF + LaTeX source when available)
 - bioRxiv preprints (metadata + full text PDF)
 - Optional: ChemRxiv, SocArXiv, Preprints.org (same architecture, additional ingestion sources)
 - Author-signed publications, institution co-signed publications
 - Citation graph as native protocol data
 - Errata, retractions, corrections as appends (never deletions)
-
-### Explicitly out of scope (MVP)
-- Published journal articles (copyright, licensing barriers)
-- Datasets (different storage profile, different metadata standards)
-- Government datasets (Data Rescue Project is handling this; complementary, not competing)
-- Peer review (future: on-archive review as appends)
-- Full-text search across the entire archive (peers maintain local indexes; no global search)
-- Web UI for browsing (future; MVP is a CLI/library + replication daemon)
 
 ---
 

@@ -7,11 +7,11 @@ This document translates the SCOPING.md architecture into concrete engineering d
 | Layer | Choice | Rationale |
 |-------|--------|----------|
 | Runtime | Node.js 24 (already installed) | Hypercore ecosystem is Node-native; p2p-digest POC uses it |
-| Blob storage | Hyperdrive v11 | File system over Hypercore; content-addressed; already a dependency in p2p-digest |
+| Blob storage | Hyperdrive v13 with Corestore | File system over Hypercore; content-addressed; v11 has internal Hyperbee version conflicts |
 | Metadata index | Hyperbee | KV store over Hypercore; replicates to all peers; range queries for category browsing |
 | Peer discovery | Hyperswarm v4 | Proven in p2p-digest POC; topic-based; no signaling server needed |
 | Content hashing | BLAKE2b via `blake2b` npm pkg | Fast, deterministic, content-addressed dedup; native to Hypercore ecosystem |
-| Local search | SQLite FTS5 via `better-sqlite3` | Synchronous API (no callback hell); FTS5 built into SQLite; matches Feediverse pattern |
+| Local search | SQLite FTS5 via Node built-in `node:sqlite` | No native dependency needed; FTS5 built into SQLite; Node 22+ ships `node:sqlite` with FTS5 support |
 | CLI | Commander.js | Standard, well-documented, subcommand support |
 | Web UI | Vanilla JS SPA, no framework | Single-page app talking to local HTTP API; minimal build complexity; matches p2p-digest viewer pattern |
 | ORCID OAuth | Local callback server (same pattern as gws_auth) | Headless Pi has no browser; manual paste of redirect URL; one-time bootstrap |
@@ -24,65 +24,54 @@ This document translates the SCOPING.md architecture into concrete engineering d
 projects/p2p-preprint-archive/
   package.json
   README.md
-  SCOPING.md              # architecture (existing)
-  RESEARCH.md             # motivation research (existing)
-  IMPLEMENTATION.md        # this file
+  SCOPING.md              # architecture and design decisions
+  RESEARCH.md             # motivation and related work
+  IMPLEMENTATION.md        # build plan and weekend-by-weekend progress
   
   src/
-    index.js               # CLI entry point (Commander.js)
+    index.js               # CLI entry point (loads dotenv, runs commander)
+    lib.js                 # library exports (initStore, publish, search, etc.)
     
     core/
-      store.js             # Hyperdrive + Hyperbee initialization, singleton
+      store.js             # Hyperdrive + Hyperbee + SQLite init, disk usage, eviction
       hash.js              # BLAKE2b content hashing, blob key derivation
-      schema.js            # JSON schema validation for metadata entries
-      constants.js         # topic names, version strings, paths
+      schema.js            # metadata validation
+      constants.js         # topic names, paths, key prefixes, valid subjects
     
     publish/
-      publish.js           # direct publishing: PDF → hash → Hyperdrive → index
-      orcid.js             # ORCID OAuth flow (local callback server)
-      identity.js          # minimal identity: ORCID iD storage, key generation
+      publish.js           # direct publishing: PDF → hash → dedup → Hyperdrive → index
+      orcid.js             # ORCID OAuth 2.0 flow (local callback server)
     
     replicate/
       swarm.js             # Hyperswarm topic management, connection handling
       replicate.js         # blob request/serve protocol over Hyperswarm
       health.js            # replication health: pin counts, at-risk papers
+      protocol.js          # custom binary protocol for blob transfer
     
     search/
       index.js             # SQLite FTS5 index management (build, query, rebuild)
     
     cli/
-      cli.js               # Commander.js command definitions
-      commands/
-        publish.js         # pharos publish
-        fetch.js           # pharos fetch
-        pin.js             # pharos pin
-        search.js          # pharos search
-        browse.js          # pharos browse
-        status.js          # pharos status
-        serve.js           # pharos serve (daemon)
+      cli.js               # Commander.js command definitions (18 commands)
     
     web/
-      server.js            # HTTP API server
-      api.js               # API route handlers
-      static/
-        index.html         # SPA shell
-        app.js             # frontend logic
-        style.css           # dark theme (reuse p2p-digest viewer palette)
-    
-    config.js               # load/save ~/.pharos/config.json
+      server.js            # HTTP API + web UI server (single file, no static dir)
   
-  test/
+  test/                    # 9 test files, 74 tests
     test_hash.js           # BLAKE2b hashing
     test_schema.js         # metadata validation
-    test_store.js           # Hyperdrive put/get
-    test_publish.js         # publish + retrieve round-trip
-    test_replicate.js       # two-node replication (in-process)
+    test_store.js           # Hyperdrive put/get, Hyperbee round-trip
+    test_publish.js         # publish + retrieve round-trip, dedup, versions
+    test_replicate.js       # two-node replication (in-process via Hyperswarm)
     test_search.js          # FTS5 indexing + query
+    test_versions.js        # version history and revision links
+    test_orcid.js           # ORCID OAuth mock flow
+    test_web.js             # web server: routing, validation, security, upload
   
   data/                    # runtime data (gitignored)
-    store/                 # Hyperdrive storage
+    store/                 # Hyperdrive storage (Corestore)
     index/                 # Hyperbee storage
-    search.db              # SQLite FTS5 database
+    pharos.db               # SQLite FTS5 database
     config.json            # node config (ORCID iD, keys, subscriptions)
 ```
 
@@ -283,16 +272,19 @@ function addToIndex(paperId, metadata, pdfBuffer)
 HTTP API + static file server. Routes:
 
 ```
-GET  /                          # SPA shell (index.html)
-GET  /api/papers?category=&q=   # list/search papers (Hyperbee + FTS5)
-GET  /api/paper/:id             # paper metadata
-GET  /api/paper/:id/pdf          # serve PDF from Hyperdrive
-GET  /api/paper/:id/versions     # version history
-GET  /api/categories            # list categories with counts
-GET  /api/status                # node status: peers, pins, storage
-POST /api/publish               # upload PDF (multipart), publish
-GET  /api/orcid/auth            # start ORCID OAuth flow, return redirect URL
+GET  /                          # Homepage (browse recent papers)
+GET  /paper/:paper_id           # Paper detail page (HTML)
+GET  /api/papers?subject=&limit= # list papers (optional filter)
+GET  /api/paper/:paper_id       # paper metadata (JSON)
+GET  /api/search?q=&limit=      # FTS5 full-text search
+GET  /api/versions/:paper_id    # version history
+GET  /api/stats                 # archive statistics
+GET  /api/disk-usage            # storage breakdown
+GET  /pdf/:paper_id             # serve PDF inline (magic byte verified)
+POST /api/publish               # upload PDF (multipart, max 50MB)
 ```
+
+Security: all responses include `X-Content-Type-Options: nosniff`, `X-Frame-Options: SAMEORIGIN`, `Referrer-Policy: no-referrer`. Only GET and POST methods allowed. Uploads validated for PDF magic bytes and subject whitelist.
 
 ## Build Order
 
@@ -306,8 +298,9 @@ The build order is designed to produce a working vertical slice (publish a PDF, 
 
 1. `npm init`, install dependencies:
    ```
-   hypercore hyperdrive hyperbee hyperswarm blake2b better-sqlite3 pdf-parse commander
+   hypercore hyperdrive hyperbee hyperswarm corestore sodium-native pdf-parse commander dotenv
    ```
+   Note: SQLite FTS5 uses Node built-in `node:sqlite` (Node 22+), no native dependency needed.
 
 2. Implement `core/hash.js` — BLAKE2b hashing, blob key derivation. Write `test/test_hash.js`.
 
@@ -379,23 +372,33 @@ The build order is designed to produce a working vertical slice (publish a PDF, 
 
 **Deliverable:** Working web UI at `http://192.168.1.151:8093`. Browse, search, read PDFs, publish new papers. This is what makes it a product.
 
-### Weekend 5: Polish + Hardening
+### Weekend 5: Polish + Hardening ✅
 
 **Goal:** Production-quality for a two-node deployment.
 
-**Steps:**
+**Completed:**
 
-1. Graceful shutdown: SIGINT handler closes Hyperdrive, Hyperbee, SQLite, Hyperswarm cleanly. No stale LOCK files.
+1. Graceful shutdown: idempotent `close()` with 5s force-timeout fallback; SIGTERM handler alongside SIGINT; no stale LOCK files.
 
-2. Storage management: auto-eviction of oldest unpinned papers when disk fills. Configurable threshold.
+2. Storage management: `getDiskUsage()` API endpoint and CLI command; `evictUnpinned(maxBytes)` CLI command evicts oldest papers with <2 replicas.
 
-3. Error handling: network failures, corrupted blobs, hash mismatches logged but don't crash the daemon.
+3. Security headers on all responses: `X-Content-Type-Options: nosniff`, `X-Frame-Options: SAMEORIGIN`, `Referrer-Policy: no-referrer`.
 
-4. README with setup instructions: install deps, configure ORCID, start daemon, connect second node.
+4. Input validation: paper ID length limits (200 chars), search query max 500 chars, subject whitelist (`VALID_SUBJECTS`), required field checks on publish (title mandatory), upload size limit 50MB (early reject via Content-Length + streaming guard).
 
-5. Docker compose for easy deployment (optional; Pi already runs Node natively).
+5. PDF magic byte verification on both upload (`%PDF-` check) and serve paths.
 
-**Deliverable:** Reliable two-node system that survives restarts, handles errors, and is documented enough for someone else to set up.
+6. Method allowlist: only GET/POST allowed, returns 405 for everything else.
+
+7. Error sanitization: generic "Internal server error" to clients instead of leaking `err.message`.
+
+8. CLI: `pharos disk-usage`, `pharos evict <max_mb>` commands added.
+
+9. README rewritten with full CLI reference, API endpoints table, valid subjects, and weekend progress.
+
+10. 8 new tests (disk-usage, non-PDF rejection, missing title, invalid subject, valid web upload, 405 method, security headers, query length limit). Total: 74 tests.
+
+**Deliverable:** Hardened two-node system with security headers, input validation, graceful shutdown, storage management, and full documentation.
 
 ## Testing Strategy
 
@@ -450,12 +453,12 @@ Two nodes publishing the same PDF independently will compute the same BLAKE2b ha
 | Pharos web UI | 8093 | Verified available |
 | ORCID OAuth callback | 8443 | Local-only, transient |
 
-## Open Implementation Questions
+## Resolved Implementation Questions
 
-1. **Hyperbee replication over Hyperswarm**: Hyperbee replicates via the same Hypercore replication stream. Need to verify that Hyperbee + Hyperdrive can share a single Hyperswarm connection (they should, since both are Hypercore-based, but this needs testing in Weekend 2).
+1. **Hyperbee replication over Hyperswarm** ✅: Hyperbee + Hyperdrive share a single Corestore and replicate via `corestore.replicate(socket)`. Verified working in Weekend 2. Blob transfer uses a separate Hyperswarm topic because Hypercore's binary replication frames corrupt the custom length-prefixed JSON protocol on the same stream.
 
-2. **PDF text extraction on the Pi**: `pdf-parse` is pure JS but can be slow for large PDFs on ARM. May need to cache extracted text in Hyperbee to avoid re-extraction. Alternatively, extract only on the node that publishes (not on every replica).
+2. **PDF text extraction on the Pi**: `pdf-parse` works on ARM but is slow for large PDFs. Text extraction runs only on the publishing node; replicas receive pre-indexed FTS5 entries via Hyperbee.
 
-3. **ORCID OAuth client registration**: requires an ORCID account (Tiago has one: 0000-0003-2361-3953). Client app registration is free but takes ~1 day for review. Should register early (before Weekend 3).
+3. **ORCID OAuth client registration** ✅: Client app registered (APP-YC0U2NG93W401578). Callback URL at https://tiagopaixao.com/orcid/callback.html (live on gh-pages). OAuth flow uses manual paste of redirect URL for headless Pi, same pattern as gws_auth.
 
-4. **Storage growth with no ingestion**: Without bootstrapping from existing archives, initial growth depends entirely on direct publishing. This is fine for the MVP (proving the cycle), but the network effect is slow to bootstrap. Post-MVP, optional arXiv/bioRxiv ingestion can seed content.
+4. **Storage growth with no ingestion**: MVP relies on direct publishing only. `pharos disk-usage` and `pharos evict` commands manage storage. Post-MVP ingestion can seed content.
