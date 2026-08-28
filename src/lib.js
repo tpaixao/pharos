@@ -1,6 +1,6 @@
 'use strict'
 
-const { initStore, getStore, close } = require('./core/store')
+const { initStore, initReplicaStore, getStore, close } = require('./core/store')
 const { publish, fetchPdf, getPaper, browseCategory } = require('./publish/publish')
 const { orcidAuth } = require('./publish/orcid')
 const { search, rebuildIndex } = require('./search/index')
@@ -9,6 +9,7 @@ const { validateMetadata } = require('./core/schema')
 
 module.exports = {
   initStore,
+  initReplicaStore,
   getStore,
   close,
   publish,

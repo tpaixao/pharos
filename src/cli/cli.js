@@ -227,4 +227,174 @@ program
     })
   })
 
+// pharos serve
+program
+  .command('serve')
+  .description('Start daemon: join Hyperswarm and serve blobs to peers')
+  .option('--no-client', 'do not connect to peers (server only)')
+  .option('--no-server', 'do not serve to peers (client only)')
+  .option('--subscribe <subjects...>', 'subject categories to subscribe to (space-separated)', [])
+  .action(async (opts) => {
+    const dataDir = path.resolve(program.opts().dataDir)
+    await pharos.initStore(dataDir)
+    const store = pharos.getStore()
+
+    const { startSwarm } = require('../replicate/swarm')
+    const { serveBlobs } = require('../replicate/replicate')
+    const { getLocalPins } = require('../replicate/health')
+
+    const swarmOpts = {
+      server: opts.server !== false,
+      client: opts.client !== false,
+      topics: opts.subscribe || []
+    }
+
+    const swarm = await startSwarm(store, swarmOpts)
+
+    // Set up blob serving on each new connection
+    const origHandler = swarm.swarm.listeners('connection')[0]
+    swarm.swarm.removeAllListeners('connection')
+    swarm.swarm.on('connection', (conn, info) => {
+      if (origHandler) origHandler(conn, info)
+      serveBlobs(conn, store)
+    })
+
+    console.log(`\nPharos daemon running.`)
+    console.log(`  Drive key:  ${store.drive.key.toString('hex')}`)
+    console.log(`  Bee key:    ${store.bee.core.key.toString('hex')}`)
+    console.log(`  Peers:      ${swarm.peers}`)
+    console.log(`  Topics:     ${['archive', ...swarmOpts.topics].join(', ')}`)
+    console.log(`\n  Press Ctrl+C to stop.`)
+
+    // Keep alive
+    process.on('SIGINT', async () => {
+      console.log('\nShutting down...')
+      await swarm.stop()
+      await pharos.close()
+      process.exit(0)
+    })
+  })
+
+// pharos pin <paper_id>
+program
+  .command('pin')
+  .description('Pin a paper locally (ensure blob is available)')
+  .argument('<paper_id>', 'paper ID to pin')
+  .action(async (paperId) => {
+    await withStore(async () => {
+      const { pinPaper } = require('../replicate/health')
+      const result = await pinPaper(paperId)
+      if (result.pinned) {
+        console.log(`Pinned: ${result.paper_id}`)
+        console.log(`  Hash: ${result.content_hash}`)
+      } else {
+        console.log(`Failed to pin: ${result.error}`)
+      }
+    })
+  })
+
+// pharos health
+program
+  .command('health')
+  .description('Show replication health report')
+  .action(async () => {
+    await withStore(async () => {
+      const { healthReport } = require('../replicate/health')
+      const report = await healthReport()
+      console.log('Replication Health')
+      console.log('==================')
+      console.log(`  Total papers: ${report.total}`)
+      console.log(`  Healthy (>= ${report.minReplicas} replicas): ${report.healthy}`)
+      console.log(`  At-risk (< ${report.minReplicas} replicas): ${report.atRisk}`)
+      if (report.atRisk > 0) {
+        console.log('\n  At-risk papers:')
+        report.papers.filter(p => p.status === 'at-risk').forEach(p => {
+          console.log(`    ${p.paper_id} (${p.replicas} replicas)`)
+        })
+      }
+    })
+  })
+
+// pharos keys
+program
+  .command('keys')
+  .description('Show this node\'s public keys for connecting peers')
+  .action(async () => {
+    await withStore(async () => {
+      const { getStore } = require('../core/store')
+      const store = getStore()
+      console.log(`Drive key: ${store.drive.key.toString('hex')}`)
+      console.log(`Bee key:   ${store.bee.core.key.toString('hex')}`)
+    })
+  })
+
+// pharos fetch-remote <paper_id> --bee-key <hex> --drive-key <hex>
+program
+  .command('fetch-remote')
+  .description('Fetch a paper from a remote peer via Hyperswarm')
+  .argument('<paper_id>', 'paper ID to fetch')
+  .requiredOption('--bee-key <hex>', 'publisher Hyperbee public key (hex)')
+  .option('--drive-key <hex>', 'publisher Hyperdrive public key (hex)')
+  .option('--output <path>', 'output file path')
+  .action(async (paperId, opts) => {
+    const dataDir = path.resolve(program.opts().dataDir)
+    await pharos.initReplicaStore(dataDir, opts.beeKey, opts.driveKey)
+    try {
+      const { getStore } = require('../core/store')
+      const { startSwarm } = require('../replicate/swarm')
+      const { requestBlob } = require('../replicate/replicate')
+
+      const store = getStore()
+      const swarm = await startSwarm(store, { server: false, client: true })
+
+      console.log('Waiting for peer connection...')
+      // Wait up to 15s for a peer
+      await new Promise(resolve => setTimeout(resolve, 15000))
+
+      if (swarm.peers === 0) {
+        console.log('No peers found. Is the publisher running `pharos serve`?')
+        await swarm.stop()
+        return
+      }
+
+      console.log(`Connected to ${swarm.peers} peer(s).`)
+
+      // Wait for bee replication to sync
+      console.log('Syncing metadata index...')
+      await new Promise(resolve => setTimeout(resolve, 5000))
+
+      const meta = await pharos.getPaper(paperId)
+      if (!meta) {
+        console.log(`Paper not found in replicated index: ${paperId}`)
+        await swarm.stop()
+        return
+      }
+
+      console.log(`Title: ${meta.title}`)
+      console.log(`Hash: ${meta.content_hash}`)
+
+      // Request the blob from a peer
+      const connections = swarm.swarm.connections
+      if (connections.length === 0) {
+        console.log('No active connections to request blob from.')
+        await swarm.stop()
+        return
+      }
+
+      const conn = connections[0]
+      const pdf = await requestBlob(conn, meta.content_hash)
+      if (pdf) {
+        const outPath = opts.output || `${paperId.replace(/[:/]/g, '_')}.pdf`
+        fs.writeFileSync(outPath, pdf)
+        console.log(`PDF saved to: ${outPath} (${pdf.length} bytes)`)
+      } else {
+        console.log('Failed to fetch blob from peer.')
+      }
+
+      await swarm.stop()
+    } finally {
+      await pharos.close()
+    }
+  })
+
 module.exports = program
