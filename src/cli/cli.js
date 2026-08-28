@@ -154,6 +154,31 @@ program
     })
   })
 
+// pharos versions <paper_id>
+program
+  .command('versions')
+  .description('Show version history for a paper')
+  .argument('<paper_id>', 'paper ID (any version)')
+  .action(async (paperId) => {
+    await withStore(async () => {
+      const versions = await pharos.getVersions(paperId)
+      if (versions.length === 0) {
+        console.log(`No versions found for: ${paperId}`)
+        process.exit(1)
+      }
+      console.log(`Version history (${versions.length} version(s)):\n`)
+      for (const v of versions) {
+        const signed = v.signed_by ? ` [signed: ${v.signed_by}]` : ''
+        const revises = v.previous_version_hash ? ` revises ${v.previous_version_hash.slice(0, 16)}...` : ''
+        console.log(`  v${v.version}  ${v.paper_id}${signed}${revises}`)
+        console.log(`        Title: ${v.title}`)
+        console.log(`        Hash: ${v.content_hash}`)
+        console.log(`        Published: ${v.published_at}`)
+        console.log()
+      }
+    })
+  })
+
 // pharos browse <category>
 program
   .command('browse')

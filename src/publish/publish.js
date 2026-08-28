@@ -190,4 +190,30 @@ async function addToIndex(db, paperId, metadata, pdfBuffer) {
   `).run(paperId, metadata.title, authorsStr, metadata.abstract || '', fulltext)
 }
 
-module.exports = { publish, fetchPdf, getPaper, browseCategory }
+/**
+ * Get version history for a paper by traversing previous_version_hash chain.
+ * Searches by base paper_id (without sequence suffix) to find all versions.
+ * @param {string} paperId - any version's paper_id
+ * @returns {Promise<object[]>} array of metadata objects, oldest first
+ */
+async function getVersions(paperId) {
+  const store = getStore()
+  const { bee } = store
+
+  // Extract base: pharos:q-bio.GN/2026.08.28/001 -> pharos:q-bio.GN/2026.08.28
+  const parts = paperId.split('/')
+  const base = parts.slice(0, -1).join('/')
+
+  // Scan all paper: entries with this base prefix
+  const prefix = `${KEY_PREFIX.PAPER}${base}/`
+  const versions = []
+  for await (const { value } of bee.createReadStream({ gte: prefix, lt: prefix + '\xff' })) {
+    versions.push(value)
+  }
+
+  // Sort by version number ascending
+  versions.sort((a, b) => a.version - b.version)
+  return versions
+}
+
+module.exports = { publish, fetchPdf, getPaper, browseCategory, getVersions }
