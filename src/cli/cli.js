@@ -314,12 +314,17 @@ program
     console.log(`  Topics:          ${['archive', 'blob-transfer', ...opts.subscribe || []].join(', ')}`)
     console.log(`\n  Press Ctrl+C to stop.`)
 
-    process.on('SIGINT', async () => {
-      console.log('\nShutting down...')
-      await stopAll()
-      await pharos.close()
+    let shuttingDown = false
+    const shutdown = async (signal) => {
+      if (shuttingDown) return
+      shuttingDown = true
+      console.log(`\n${signal} received, shutting down...`)
+      try { await stopAll() } catch (_) {}
+      try { await pharos.close() } catch (_) {}
       process.exit(0)
-    })
+    }
+    process.on('SIGINT', () => shutdown('SIGINT'))
+    process.on('SIGTERM', () => shutdown('SIGTERM'))
   })
 
 // pharos pin <paper_id>
@@ -472,13 +477,66 @@ program
     console.log(`  Drive key:    ${store.drive.key.toString('hex')}`)
     console.log(`  Bee key:      ${store.bee.core.key.toString('hex')}`)
     console.log(`  Data dir:     ${dataDir}`)
-    console.log(`\n  Press Ctrl+C to stop.`)
 
-    process.on('SIGINT', async () => {
-      console.log('\nShutting down...')
-      await pharos.close()
+    // Graceful shutdown
+    let shuttingDown = false
+    const shutdown = async (signal) => {
+      if (shuttingDown) return
+      shuttingDown = true
+      console.log(`\n${signal} received, shutting down...`)
+      try {
+        await pharos.webServer.stopServer()
+      } catch (_) {}
+      try {
+        await pharos.close()
+      } catch (_) {}
       process.exit(0)
+    }
+
+    process.on('SIGINT', () => shutdown('SIGINT'))
+    process.on('SIGTERM', () => shutdown('SIGTERM'))
+
+    console.log(`\n  Press Ctrl+C to stop.`)
+  })
+
+// pharos disk-usage
+program
+  .command('disk-usage')
+  .description('Show disk usage of the data directory')
+  .action(async () => {
+    await withStore(async () => {
+      const { getDiskUsage } = require('../core/store')
+      const usage = await getDiskUsage()
+      console.log('Disk Usage')
+      console.log('==========')
+      console.log(`  Hyperdrive:  ${formatBytes(usage.store_bytes)}`)
+      console.log(`  Hyperbee:    ${formatBytes(usage.index_bytes)}`)
+      console.log(`  SQLite DB:   ${formatBytes(usage.db_bytes)}`)
+      console.log(`  Total:       ${formatBytes(usage.total_bytes)}`)
     })
   })
+
+// pharos evict <max-mb>
+program
+  .command('evict')
+  .description('Evict oldest unpinned papers to free disk space')
+  .argument('<max_mb>', 'target maximum total storage in MB')
+  .action(async (maxMb) => {
+    await withStore(async () => {
+      const { evictUnpinned } = require('../core/store')
+      const maxBytes = parseInt(maxMb) * 1024 * 1024
+      console.log(`Evicting papers until total storage is under ${formatBytes(maxBytes)}...`)
+      const result = await evictUnpinned(maxBytes)
+      console.log(`  Evicted: ${result.evicted} paper(s)`)
+      console.log(`  Freed:   ${formatBytes(result.freed_bytes)}`)
+    })
+  })
+
+function formatBytes(bytes) {
+  if (bytes === 0) return '0 B'
+  const units = ['B', 'KB', 'MB', 'GB', 'TB']
+  const i = Math.floor(Math.log(bytes) / Math.log(1024))
+  return `${(bytes / Math.pow(1024, i)).toFixed(1)} ${units[i]}`
+}
 
 module.exports = program

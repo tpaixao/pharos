@@ -1,6 +1,6 @@
 'use strict'
 
-const { initStore, initReplicaStore, getStore, close } = require('./core/store')
+const { initStore, initReplicaStore, getStore, close, getDiskUsage, evictUnpinned } = require('./core/store')
 const { publish, fetchPdf, getPaper, browseCategory, getVersions } = require('./publish/publish')
 const { orcidAuth } = require('./publish/orcid')
 const { search, rebuildIndex } = require('./search/index')
@@ -26,5 +26,7 @@ module.exports = {
   blobKey,
   subjectFromPaperId,
   validateMetadata,
-  webServer
+  webServer,
+  getDiskUsage,
+  evictUnpinned
 }

@@ -42,6 +42,73 @@ function fetchUrl(path) {
   })
 }
 
+function postUrl(path, body, contentType) {
+  return new Promise((resolve, reject) => {
+    const req = http.request(`http://127.0.0.1:${testPort}${path}`, {
+      method: 'POST',
+      headers: { 'Content-Type': contentType, 'Content-Length': body.length }
+    }, (res) => {
+      let data = ''
+      res.on('data', (c) => data += c)
+      res.on('end', () => resolve({ status: res.statusCode, headers: res.headers, body: data }))
+    })
+    req.on('error', reject)
+    req.end(body)
+  })
+}
+
+function requestMethod(method, path) {
+  return new Promise((resolve, reject) => {
+    const req = http.request(`http://127.0.0.1:${testPort}${path}`, { method }, (res) => {
+      let data = ''
+      res.on('data', (c) => data += c)
+      res.on('end', () => resolve({ status: res.statusCode, headers: res.headers, body: data }))
+    })
+    req.on('error', reject)
+    req.end()
+  })
+}
+
+function buildMultipart(fields, files) {
+  const boundary = 'testboundary' + Math.random().toString(36).slice(2)
+  const parts = []
+
+  for (const [key, val] of Object.entries(fields)) {
+    parts.push(`--${boundary}\r\nContent-Disposition: form-data; name="${key}"\r\n\r\n${val}`)
+  }
+
+  for (const [key, file] of Object.entries(files || {})) {
+    parts.push(`--${boundary}\r\nContent-Disposition: form-data; name="${key}"; filename="${file.filename}"\r\nContent-Type: application/pdf\r\n\r\n`)
+  }
+
+  let buffer = Buffer.concat([
+    Buffer.from(parts[0], 'utf-8'),
+    ...(parts.length > 1 ? parts.slice(1).map((p, i) => {
+      if (files && Object.keys(files)[i] && p.includes('filename=')) {
+        return Buffer.concat([Buffer.from(p, 'utf-8'), files[Object.keys(files)[i]].data])
+      }
+      return Buffer.from(p, 'utf-8')
+    }) : [])
+  ])
+
+  // Simpler approach: build manually
+  const chunks = []
+  for (const [key, val] of Object.entries(fields)) {
+    chunks.push(Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="${key}"\r\n\r\n${val}\r\n`))
+  }
+  for (const [key, file] of Object.entries(files || {})) {
+    chunks.push(Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="${key}"; filename="${file.filename}"\r\nContent-Type: application/pdf\r\n\r\n`))
+    chunks.push(file.data)
+    chunks.push(Buffer.from('\r\n'))
+  }
+  chunks.push(Buffer.from(`--${boundary}--\r\n`))
+
+  return {
+    buffer: Buffer.concat(chunks),
+    contentType: `multipart/form-data; boundary=${boundary}`
+  }
+}
+
 function makeTestPdf(title) {
   return Buffer.from(`%PDF-1.4
 1 0 obj << /Type /Catalog /Pages 2 0 R >> endobj
@@ -248,6 +315,123 @@ test('web: GET /api/paper/nonexistent returns null', async () => {
     assert.strictEqual(res.status, 200)
     const data = JSON.parse(res.body)
     assert.strictEqual(data, null)
+  } finally {
+    await stopTestServer()
+  }
+})
+test('web: GET /api/disk-usage returns storage stats', async () => {
+  await startTestServer()
+  try {
+    await publishTestPaper('Disk Usage Paper', 'q-bio.GN')
+    const res = await fetchUrl('/api/disk-usage')
+    assert.strictEqual(res.status, 200)
+    const data = JSON.parse(res.body)
+    assert.ok(data.total_bytes >= 0)
+    assert.ok(data.store_bytes >= 0)
+  } finally {
+    await stopTestServer()
+  }
+})
+
+test('web: POST /api/publish rejects non-PDF files', async () => {
+  await startTestServer()
+  try {
+    const body = buildMultipart({
+      title: 'Fake Paper',
+      subject: 'q-bio.GN',
+      authors: 'Test Author'
+    }, { pdf: { filename: 'fake.pdf', data: Buffer.from('not a pdf') } })
+    const res = await postUrl('/api/publish', body.buffer, body.contentType)
+    assert.strictEqual(res.status, 400)
+    const data = JSON.parse(res.body)
+    assert.ok(data.error.includes('not a valid PDF'))
+  } finally {
+    await stopTestServer()
+  }
+})
+
+test('web: POST /api/publish rejects missing title', async () => {
+  await startTestServer()
+  try {
+    const body = buildMultipart({
+      subject: 'q-bio.GN',
+      authors: 'Test Author'
+    }, { pdf: { filename: 'test.pdf', data: makeTestPdf('test') } })
+    const res = await postUrl('/api/publish', body.buffer, body.contentType)
+    assert.strictEqual(res.status, 400)
+    const data = JSON.parse(res.body)
+    assert.ok(data.error.includes('Title is required'))
+  } finally {
+    await stopTestServer()
+  }
+})
+
+test('web: POST /api/publish rejects invalid subject', async () => {
+  await startTestServer()
+  try {
+    const body = buildMultipart({
+      title: 'Bad Subject Paper',
+      subject: 'invalid.subject',
+      authors: 'Test Author'
+    }, { pdf: { filename: 'test.pdf', data: makeTestPdf('test') } })
+    const res = await postUrl('/api/publish', body.buffer, body.contentType)
+    assert.strictEqual(res.status, 400)
+    const data = JSON.parse(res.body)
+    assert.ok(data.error.includes('Invalid subject'))
+  } finally {
+    await stopTestServer()
+  }
+})
+
+test('web: POST /api/publish accepts valid paper via web upload', async () => {
+  await startTestServer()
+  try {
+    const body = buildMultipart({
+      title: 'Web Upload Paper',
+      subject: 'q-bio.GN',
+      authors: 'Author One, Author Two',
+      abstract: 'An abstract for the web upload test paper.'
+    }, { pdf: { filename: 'test.pdf', data: makeTestPdf('test') } })
+    const res = await postUrl('/api/publish', body.buffer, body.contentType)
+    assert.strictEqual(res.status, 200)
+    const data = JSON.parse(res.body)
+    assert.ok(data.success)
+    assert.ok(data.paper_id)
+  } finally {
+    await stopTestServer()
+  }
+})
+
+test('web: PUT method returns 405', async () => {
+  await startTestServer()
+  try {
+    const res = await requestMethod('PUT', '/api/papers')
+    assert.strictEqual(res.status, 405)
+  } finally {
+    await stopTestServer()
+  }
+})
+
+test('web: response headers include security headers', async () => {
+  await startTestServer()
+  try {
+    const res = await fetchUrl('/')
+    assert.strictEqual(res.headers['x-content-type-options'], 'nosniff')
+    assert.strictEqual(res.headers['x-frame-options'], 'SAMEORIGIN')
+    assert.strictEqual(res.headers['referrer-policy'], 'no-referrer')
+  } finally {
+    await stopTestServer()
+  }
+})
+
+test('web: search query over 500 chars returns 400', async () => {
+  await startTestServer()
+  try {
+    const longQuery = 'a'.repeat(501)
+    const res = await fetchUrl('/api/search?q=' + encodeURIComponent(longQuery))
+    assert.strictEqual(res.status, 400)
+    const data = JSON.parse(res.body)
+    assert.ok(data.error.includes('too long'))
   } finally {
     await stopTestServer()
   }

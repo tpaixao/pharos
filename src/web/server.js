@@ -19,14 +19,16 @@ const http = require('http')
 const { URL } = require('url')
 
 // Import directly from core modules to avoid circular dependency with lib.js
-const { initStore, getStore } = require('../core/store')
-const { close } = require('../core/store')
+const { initStore, getStore, close, getDiskUsage, evictUnpinned } = require('../core/store')
 const { publish, fetchPdf, getPaper, browseCategory, getVersions } = require('../publish/publish')
 const { orcidAuth } = require('../publish/orcid')
 const { search } = require('../search/index')
-const { KEY_PREFIX } = require('../core/constants')
+const { KEY_PREFIX, VALID_SUBJECTS } = require('../core/constants')
 
 let serverInstance = null
+
+// Max upload size: 50MB
+const MAX_UPLOAD_BYTES = 50 * 1024 * 1024
 
 /**
  * Start the Pharos web server.
@@ -51,9 +53,19 @@ async function startServer(opts = {}) {
 }
 
 async function handleRequest(req, res) {
+  // Security headers
+  res.setHeader('X-Content-Type-Options', 'nosniff')
+  res.setHeader('X-Frame-Options', 'SAMEORIGIN')
+  res.setHeader('Referrer-Policy', 'no-referrer')
+
   const url = new URL(req.url, `http://${req.headers.host}`)
   const pathname = url.pathname
   const method = req.method
+
+  // Only allow GET and POST
+  if (method !== 'GET' && method !== 'POST') {
+    return sendJSON(res, { error: 'Method not allowed' }, 405)
+  }
 
   try {
     // ---- Static pages ----
@@ -64,24 +76,33 @@ async function handleRequest(req, res) {
     // Paper detail page: /paper/pharos:q-bio.GN/2026.08.28/001
     if (method === 'GET' && pathname.startsWith('/paper/')) {
       const paperId = decodeURIComponent(pathname.slice('/paper/'.length))
+      if (!paperId || paperId.length > 200) {
+        return sendHTML(res, renderErrorPage('Invalid paper ID'))
+      }
       return sendHTML(res, renderPaperPage(paperId))
     }
 
     // ---- API routes ----
     if (method === 'GET' && pathname === '/api/papers') {
       const subject = url.searchParams.get('subject') || ''
-      const limit = parseInt(url.searchParams.get('limit') || '50')
+      const limit = Math.min(Math.max(parseInt(url.searchParams.get('limit') || '50'), 1), 200)
       return sendJSON(res, await listPapers(subject, limit))
     }
 
     if (method === 'GET' && pathname.startsWith('/api/paper/')) {
       const paperId = decodeURIComponent(pathname.slice('/api/paper/'.length))
+      if (!paperId || paperId.length > 200) {
+        return sendJSON(res, { error: 'Invalid paper ID' }, 400)
+      }
       return sendJSON(res, await getPaper(paperId))
     }
 
     if (method === 'GET' && pathname === '/api/search') {
       const q = url.searchParams.get('q') || ''
-      const limit = parseInt(url.searchParams.get('limit') || '20')
+      if (q.length > 500) {
+        return sendJSON(res, { error: 'Query too long' }, 400)
+      }
+      const limit = Math.min(Math.max(parseInt(url.searchParams.get('limit') || '20'), 1), 100)
       return sendJSON(res, search(q, { limit }))
     }
 
@@ -94,14 +115,26 @@ async function handleRequest(req, res) {
       return sendJSON(res, await getStats())
     }
 
+    if (method === 'GET' && pathname === '/api/disk-usage') {
+      return sendJSON(res, await getDiskUsage())
+    }
+
     // ---- PDF serving ----
     if (method === 'GET' && pathname.startsWith('/pdf/')) {
       const paperId = decodeURIComponent(pathname.slice('/pdf/'.length))
+      if (!paperId || paperId.length > 200) {
+        return sendJSON(res, { error: 'Invalid paper ID' }, 400)
+      }
       return servePdf(res, paperId)
     }
 
     // ---- Publish (multipart upload) ----
     if (method === 'POST' && pathname === '/api/publish') {
+      // Check content-length to reject oversized uploads early
+      const contentLength = parseInt(req.headers['content-length'] || '0')
+      if (contentLength > MAX_UPLOAD_BYTES) {
+        return sendJSON(res, { error: 'Upload too large (max 50MB)' }, 413)
+      }
       return handlePublish(req, res)
     }
 
@@ -109,7 +142,7 @@ async function handleRequest(req, res) {
     return sendJSON(res, { error: 'Not found' }, 404)
   } catch (err) {
     console.error('[web] Error:', err.message)
-    return sendJSON(res, { error: err.message }, 500)
+    return sendJSON(res, { error: 'Internal server error' }, 500)
   }
 }
 
@@ -157,10 +190,16 @@ async function servePdf(res, paperId) {
   if (!pdf) {
     return sendJSON(res, { error: 'PDF not found' }, 404)
   }
+  // Verify the blob starts with %PDF to prevent serving non-PDF content
+  if (!pdf.slice(0, 5).toString('ascii').startsWith('%PDF-')) {
+    console.error('[web] PDF magic bytes mismatch for', paperId)
+    return sendJSON(res, { error: 'Invalid PDF content' }, 500)
+  }
   res.writeHead(200, {
     'Content-Type': 'application/pdf',
     'Content-Length': pdf.length,
-    'Content-Disposition': `inline; filename="${paperId.replace(/[:/]/g, '_')}.pdf"`
+    'Content-Disposition': `inline; filename="${paperId.replace(/[:/]/g, '_')}.pdf"`,
+    'X-Content-Type-Options': 'nosniff'
   })
   res.end(pdf)
 }
@@ -177,12 +216,31 @@ async function handlePublish(req, res) {
     return sendJSON(res, { error: 'No boundary in content-type' }, 400)
   }
 
-  const body = await readBody(req)
+  const body = await readBody(req, MAX_UPLOAD_BYTES)
+  if (!body) {
+    return sendJSON(res, { error: 'Upload too large (max 50MB)' }, 413)
+  }
+
   const fields = parseMultipart(body, boundary)
 
   const pdfFile = fields._files && fields._files.pdf
   if (!pdfFile) {
     return sendJSON(res, { error: 'No PDF file uploaded' }, 400)
+  }
+
+  // Validate file type by magic bytes
+  if (!pdfFile.data.slice(0, 5).toString('ascii').startsWith('%PDF-')) {
+    return sendJSON(res, { error: 'File is not a valid PDF' }, 400)
+  }
+
+  // Validate required fields
+  if (!fields.title || !fields.title.trim()) {
+    return sendJSON(res, { error: 'Title is required' }, 400)
+  }
+
+  // Validate subject
+  if (fields.subject && !VALID_SUBJECTS.includes(fields.subject)) {
+    return sendJSON(res, { error: 'Invalid subject category' }, 400)
   }
 
   // Write PDF to temp file for publish()
@@ -226,11 +284,26 @@ async function handlePublish(req, res) {
 
 // ---- Multipart parsing (simple, no deps) ----
 
-function readBody(req) {
+function readBody(req, maxBytes) {
   return new Promise((resolve) => {
     const chunks = []
-    req.on('data', (c) => chunks.push(c))
-    req.on('end', () => resolve(Buffer.concat(chunks)))
+    let total = 0
+    let aborted = false
+
+    req.on('data', (c) => {
+      if (aborted) return
+      total += c.length
+      if (total > maxBytes) {
+        aborted = true
+        resolve(null) // signal oversized
+        return
+      }
+      chunks.push(c)
+    })
+    req.on('end', () => {
+      if (!aborted) resolve(Buffer.concat(chunks))
+    })
+    req.on('error', () => resolve(null))
   })
 }
 
@@ -297,9 +370,30 @@ function sendJSON(res, obj, status = 200) {
 function sendHTML(res, html) {
   res.writeHead(200, {
     'Content-Type': 'text/html; charset=utf-8',
-    'Content-Length': Buffer.byteLength(html)
+    'Content-Length': Buffer.byteLength(html),
+    'X-Content-Type-Options': 'nosniff'
   })
   res.end(html)
+}
+
+function renderErrorPage(message) {
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Pharos - Error</title>
+  <style>
+    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #0d1117; color: #c9d1d9; padding: 40px; text-align: center; }
+    a { color: #58a6ff; }
+  </style>
+</head>
+<body>
+  <h2>Error</h2>
+  <p>${message}</p>
+  <p><a href="/">Back to Pharos</a></p>
+</body>
+</html>`
 }
 
 // ---- HTML rendering ----

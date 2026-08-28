@@ -36,6 +36,12 @@ const KEY_PREFIX = {
   ORCID: 'orcid:'
 }
 
+// Valid subject categories for publishing
+const VALID_SUBJECTS = [
+  'q-bio.GN', 'q-bio.QM', 'q-bio.BM', 'q-bio.CB', 'q-bio.MN', 'q-bio.PE', 'q-bio.TO',
+  'cs.LG', 'cs.AI', 'stat.ML', 'stat.AP', 'stat.ME'
+]
+
 module.exports = {
   PHAROS_VERSION,
   ARCHIVE_TOPIC,
@@ -49,5 +55,6 @@ module.exports = {
   ORCID_CALLBACK_URL,
   ORCID_PROD,
   ORCID_SANDBOX,
-  KEY_PREFIX
+  KEY_PREFIX,
+  VALID_SUBJECTS
 }
