@@ -454,4 +454,31 @@ program
     }
   })
 
+// pharos web
+program
+  .command('web')
+  .description('Start the Pharos web UI server')
+  .option('--port <n>', 'port number', '8093')
+  .action(async (opts) => {
+    const dataDir = path.resolve(program.opts().dataDir)
+    await pharos.initStore(dataDir)
+    const port = parseInt(opts.port)
+    const server = await pharos.webServer.startServer({ port, dataDir })
+
+    const store = pharos.getStore()
+    console.log(`\nPharos Web UI`)
+    console.log(`==============`)
+    console.log(`  URL:          http://0.0.0.0:${port}`)
+    console.log(`  Drive key:    ${store.drive.key.toString('hex')}`)
+    console.log(`  Bee key:      ${store.bee.core.key.toString('hex')}`)
+    console.log(`  Data dir:     ${dataDir}`)
+    console.log(`\n  Press Ctrl+C to stop.`)
+
+    process.on('SIGINT', async () => {
+      console.log('\nShutting down...')
+      await pharos.close()
+      process.exit(0)
+    })
+  })
+
 module.exports = program

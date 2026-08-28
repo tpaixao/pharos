@@ -96,6 +96,7 @@ async function publish(pdfPath, opts) {
     size: pdfBuffer.length,
     replicated_by: metadata.replicated_by
   })
+  await bee.put(`${KEY_PREFIX.CATEGORY}${metadata.subject}:recent:${paperId}`, { paper_id: paperId })
   if (opts.doi) {
     await bee.put(`${KEY_PREFIX.DOI}${opts.doi}`, { paper_id: paperId })
   }
@@ -147,10 +148,12 @@ async function getPaper(paperId) {
  */
 async function browseCategory(subject, limit = 20) {
   const store = getStore()
-  const prefix = `${KEY_PREFIX.CATEGORY}${subject}:recent`
+  const prefix = `${KEY_PREFIX.CATEGORY}${subject}:recent:`
   const results = []
   for await (const { value } of store.bee.createReadStream({ gt: prefix, lt: prefix + '\xff' })) {
-    results.push(value)
+    // value is { paper_id }, fetch full metadata
+    const fullMeta = await store.bee.get(`${KEY_PREFIX.PAPER}${value.paper_id}`)
+    if (fullMeta) results.push(fullMeta.value)
     if (results.length >= limit) break
   }
   return results
