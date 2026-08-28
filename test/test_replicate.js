@@ -45,7 +45,7 @@ function createStreamPair() {
 
 // Ensure store is closed before each test
 async function freshStore(tmpDir) {
-  await close() // ensure any previous store is cleaned up
+  await close()
   await initStore(tmpDir)
   return getStore()
 }
@@ -161,16 +161,15 @@ test('replicate: health report tracks at-risk papers', async () => {
     assert.equal(report1.total, 1)
     assert.equal(report1.atRisk, 1)
     assert.equal(report1.healthy, 0)
-
+    
     // Add a replica peer
     await addReplica(paperId, 'peer-abc')
     const report2 = await healthReport()
     assert.equal(report2.atRisk, 1)
     assert.equal(report2.healthy, 0)
     assert.equal(report2.papers[0].replicas, 2)
-
-    // Add 1 more replica -> still at-risk (3 total but need 3 *external* peers)
-    // Actually MIN_REPLICAS=3, so 3 replicas = healthy
+    
+    // Add 1 more replica -> 3 total = healthy
     await addReplica(paperId, 'peer-def')
     const report3 = await healthReport()
     assert.equal(report3.healthy, 1)

@@ -4,14 +4,23 @@ const { computeHash } = require('../core/hash')
 const { KEY_PREFIX } = require('../core/constants')
 
 /**
- * Blob request/serve protocol over a raw stream.
+ * Blob request/serve protocol over a dedicated Hyperswarm connection.
  *
- * Message format (length-prefixed JSON):
+ * Problem: We tried multiplexing our JSON blob protocol on the same stream
+ * as Hypercore replication, but Hypercore's replication stream sends binary
+ * data that corrupts our length-prefixed JSON parsing.
+ *
+ * Solution: Use a SEPARATE connection (separate swarm topic) for the blob
+ * request/serve protocol. The metadata replication (Hyperbee/Hyperdrive)
+ * happens on the archive topic via corestore.replicate(). Blob requests
+ * happen on a dedicated "blob-transfer" topic where we own the stream entirely.
+ *
+ * Wire format: 4-byte big-endian length prefix + JSON payload
+ *
+ * Message types:
  *   Request:  { type: "request_blob", hash: "blake2b:..." }
  *   Response: { type: "blob", hash: "blake2b:...", size: N, data: "<hex>" }
  *   Error:    { type: "error", hash: "blake2b:...", message: "..." }
- *
- * Wire format: 4-byte big-endian length prefix + JSON payload
  */
 
 const HEADER_SIZE = 4
@@ -23,7 +32,7 @@ const HEADER_SIZE = 4
  */
 function sendMessage(stream, msg) {
   const json = Buffer.from(JSON.stringify(msg))
-  const header = Buffer.allocUnsafe(HEADER_SIZE)
+  const header = Buffer.alloc(HEADER_SIZE)
   header.writeUInt32BE(json.length, 0)
   stream.write(Buffer.concat([header, json]))
 }
@@ -51,7 +60,7 @@ function readMessages(stream, onMessage) {
       try {
         msg = JSON.parse(json.toString('utf-8'))
       } catch (err) {
-        console.error('[replicate] Failed to parse message:', err.message)
+        console.error('[blob-transfer] Failed to parse message:', err.message)
         continue
       }
       onMessage(msg)
@@ -64,9 +73,8 @@ function readMessages(stream, onMessage) {
 
 /**
  * Handle incoming blob requests as a server.
- * When a peer requests a blob by hash, look it up and serve it.
  *
- * @param {Duplex} stream - the replication connection
+ * @param {Duplex} stream - dedicated blob transfer connection (NOT a corestore replication stream)
  * @param {object} store - store instance
  */
 function serveBlobs(stream, store) {
@@ -76,10 +84,9 @@ function serveBlobs(stream, store) {
     if (msg.type !== 'request_blob') return
 
     const { hash } = msg
-    console.log(`[replicate] Blob request: ${hash.slice(0, 20)}...`)
+    console.log(`[blob-transfer] Blob request: ${hash.slice(0, 20)}...`)
 
     try {
-      // Look up hash in Hyperbee
       const entry = await bee.get(`${KEY_PREFIX.HASH}${hash}`)
       if (!entry) {
         sendMessage(stream, { type: 'error', hash, message: 'not found' })
@@ -93,7 +100,6 @@ function serveBlobs(stream, store) {
         return
       }
 
-      // Verify hash before sending
       const actualHash = computeHash(blob)
       if (actualHash !== hash) {
         sendMessage(stream, { type: 'error', hash, message: 'hash mismatch' })
@@ -106,7 +112,7 @@ function serveBlobs(stream, store) {
         size: blob.length,
         data: blob.toString('hex')
       })
-      console.log(`[replicate] Served blob: ${hash.slice(0, 20)}... (${blob.length} bytes)`)
+      console.log(`[blob-transfer] Served blob: ${hash.slice(0, 20)}... (${blob.length} bytes)`)
     } catch (err) {
       sendMessage(stream, { type: 'error', hash, message: err.message })
     }
@@ -116,7 +122,7 @@ function serveBlobs(stream, store) {
 /**
  * Request a blob from a peer by content hash.
  *
- * @param {Duplex} stream - the replication connection
+ * @param {Duplex} stream - dedicated blob transfer connection
  * @param {string} contentHash - blake2b:... hash
  * @param {number} [timeoutMs=10000] - response timeout
  * @returns {Promise<Buffer|null>} blob buffer, verified by hash, or null on failure
@@ -143,41 +149,27 @@ function requestBlob(stream, contentHash, timeoutMs = 10000) {
 
       if (msg.type === 'blob') {
         const blob = Buffer.from(msg.data, 'hex')
-        // Verify hash
         const actualHash = computeHash(blob)
         if (actualHash !== contentHash) {
-          console.error('[replicate] Hash mismatch on received blob!')
+          console.error('[blob-transfer] Hash mismatch on received blob!')
           resolve(null)
           return
         }
-        console.log(`[replicate] Received blob: ${contentHash.slice(0, 20)}... (${blob.length} bytes)`)
+        console.log(`[blob-transfer] Received blob: ${contentHash.slice(0, 20)}... (${blob.length} bytes)`)
         resolve(blob)
       } else if (msg.type === 'error') {
-        console.log(`[replicate] Peer error: ${msg.message}`)
+        console.log(`[blob-transfer] Peer error: ${msg.message}`)
         resolve(null)
       }
     })
 
-    // Send request
     sendMessage(stream, { type: 'request_blob', hash: contentHash })
   })
-}
-
-/**
- * Announce pins on a swarm connection.
- * Notifies peers what blobs this node has available.
- *
- * @param {Duplex} stream
- * @param {string[]} hashes - content hashes this node pins
- */
-function announcePins(stream, hashes) {
-  sendMessage(stream, { type: 'pin_announce', hashes })
 }
 
 module.exports = {
   sendMessage,
   readMessages,
   serveBlobs,
-  requestBlob,
-  announcePins
+  requestBlob
 }

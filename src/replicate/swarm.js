@@ -1,10 +1,12 @@
 'use strict'
 
 const crypto = require('crypto')
-const { ARCHIVE_TOPIC } = require('../core/constants')
+const { ARCHIVE_TOPIC, BLOB_TRANSFER_TOPIC } = require('../core/constants')
 
-let swarmInstance = null
+let archiveSwarmInstance = null
+let blobSwarmInstance = null
 let connectedPeers = new Set()
+let blobConnections = []
 
 /**
  * Derive a Hyperswarm topic buffer from a string.
@@ -16,11 +18,19 @@ function topicFromName(name) {
 }
 
 /**
- * Get the global archive topic.
+ * Get the global archive topic (for metadata replication).
  * @returns {Buffer}
  */
 function archiveTopic() {
   return topicFromName(ARCHIVE_TOPIC)
+}
+
+/**
+ * Get the blob transfer topic (for blob request/serve).
+ * @returns {Buffer}
+ */
+function blobTransferTopic() {
+  return topicFromName(BLOB_TRANSFER_TOPIC)
 }
 
 /**
@@ -33,84 +43,126 @@ function categoryTopic(subject) {
 }
 
 /**
- * Start a Hyperswarm node that replicates the store's cores.
+ * Start the archive swarm for metadata replication (Hyperbee/Hyperdrive).
+ * This swarm handles corestore.replicate() for syncing the index and blobs.
  *
  * @param {object} store - store instance from initStore/initReplicaStore
  * @param {object} opts - { server: true, client: true, topics: ['q-bio.GN', ...] }
- * @returns {Promise<object>} { swarm, peers, stop }
+ * @returns {Promise<object>} { swarm, peers, peerKeys, stop }
  */
-async function startSwarm(store, opts = {}) {
+async function startArchiveSwarm(store, opts = {}) {
   const Hyperswarm = require('hyperswarm')
   const { server = true, client = true, topics = [] } = opts
 
   const swarm = new Hyperswarm()
-  const { corestore, bee, drive } = store
+  const { corestore } = store
 
-  // Track peer connections
   swarm.on('connection', (conn, info) => {
     const peerKey = info.publicKey?.toString('hex') || 'unknown'
     connectedPeers.add(peerKey)
-    console.log(`[swarm] Peer connected: ${peerKey.slice(0, 12)}...`)
+    console.log(`[archive-swarm] Peer connected: ${peerKey.slice(0, 12)}...`)
 
-    // Replicate all cores in the corestore over this connection
     conn.on('error', (err) => {
-      console.log(`[swarm] Connection error: ${err.message}`)
+      console.log(`[archive-swarm] Connection error: ${err.message}`)
       connectedPeers.delete(peerKey)
     })
 
     conn.on('close', () => {
       connectedPeers.delete(peerKey)
-      console.log(`[swarm] Peer disconnected: ${peerKey.slice(0, 12)}...`)
+      console.log(`[archive-swarm] Peer disconnected: ${peerKey.slice(0, 12)}...`)
     })
 
-    // Pipe the corestore replication stream
+    // Replicate all cores in the corestore over this connection
     corestore.replicate(conn)
   })
 
-  // Join the global archive topic
   const archTopic = archiveTopic()
   swarm.join(archTopic, { server, client })
-  console.log(`[swarm] Joined archive topic: ${ARCHIVE_TOPIC}`)
+  console.log(`[archive-swarm] Joined archive topic: ${ARCHIVE_TOPIC}`)
 
-  // Join per-category topics
   for (const subject of topics) {
     const catTopic = categoryTopic(subject)
     swarm.join(catTopic, { server, client })
-    console.log(`[swarm] Joined category topic: ${subject}`)
+    console.log(`[archive-swarm] Joined category topic: ${subject}`)
   }
 
-  // Wait for swarm ready
   await swarm.flush()
 
-  swarmInstance = {
+  archiveSwarmInstance = {
     swarm,
     get peers() { return connectedPeers.size },
     peerKeys: connectedPeers,
-    stop
-  }
-  return swarmInstance
-
-  async function stop() {
-    for (const peerKey of connectedPeers) {
-      // connections auto-close
+    connections: () => Array.from(swarm.connections),
+    stop: async () => {
+      connectedPeers.clear()
+      await swarm.destroy()
+      archiveSwarmInstance = null
     }
-    connectedPeers.clear()
-    await swarm.destroy()
-    swarmInstance = null
   }
+  return archiveSwarmInstance
 }
 
 /**
- * Stop the active swarm if running.
+ * Start the blob transfer swarm (dedicated channel for blob request/serve).
+ * Connections on this swarm are NOT used for corestore replication.
+ * They are clean streams where we own the protocol entirely.
+ *
+ * @param {function} onConnection - callback(conn, info) for each new connection
+ * @param {object} opts - { server: true, client: true }
+ * @returns {Promise<object>} { swarm, connections, stop }
  */
-async function stopSwarm() {
-  if (swarmInstance) {
-    await swarmInstance.stop()
+async function startBlobSwarm(onConnection, opts = {}) {
+  const Hyperswarm = require('hyperswarm')
+  const { server = true, client = true } = opts
+
+  const swarm = new Hyperswarm()
+
+  swarm.on('connection', (conn, info) => {
+    const peerKey = info.publicKey?.toString('hex') || 'unknown'
+    console.log(`[blob-swarm] Peer connected: ${peerKey.slice(0, 12)}...`)
+
+    conn.on('error', (err) => {
+      console.log(`[blob-swarm] Connection error: ${err.message}`)
+    })
+
+    conn.on('close', () => {
+      console.log(`[blob-swarm] Peer disconnected: ${peerKey.slice(0, 12)}...`)
+      blobConnections = blobConnections.filter(c => c !== conn)
+    })
+
+    blobConnections.push(conn)
+
+    if (onConnection) onConnection(conn, info)
+  })
+
+  const bTopic = blobTransferTopic()
+  swarm.join(bTopic, { server, client })
+  console.log(`[blob-swarm] Joined blob transfer topic: ${BLOB_TRANSFER_TOPIC}`)
+
+  await swarm.flush()
+
+  blobSwarmInstance = {
+    swarm,
+    get connections() { return blobConnections },
+    stop: async () => {
+      blobConnections = []
+      await swarm.destroy()
+      blobSwarmInstance = null
+    }
   }
+  return blobSwarmInstance
 }
 
 /**
- * Get active peer count.
+ * Stop all swarms.
+ */
+async function stopAll() {
+  if (archiveSwarmInstance) await archiveSwarmInstance.stop()
+  if (blobSwarmInstance) await blobSwarmInstance.stop()
+}
+
+/**
+ * Get active peer count (archive swarm).
  * @returns {number}
  */
 function peerCount() {
@@ -118,9 +170,11 @@ function peerCount() {
 }
 
 module.exports = {
-  startSwarm,
-  stopSwarm,
+  startArchiveSwarm,
+  startBlobSwarm,
+  stopAll,
   archiveTopic,
+  blobTransferTopic,
   categoryTopic,
   topicFromName,
   peerCount

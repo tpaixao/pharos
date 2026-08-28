@@ -239,37 +239,35 @@ program
     await pharos.initStore(dataDir)
     const store = pharos.getStore()
 
-    const { startSwarm } = require('../replicate/swarm')
+    const { startArchiveSwarm, startBlobSwarm, stopAll } = require('../replicate/swarm')
     const { serveBlobs } = require('../replicate/replicate')
-    const { getLocalPins } = require('../replicate/health')
 
-    const swarmOpts = {
+    // Archive swarm: metadata replication (Hyperbee/Hyperdrive via corestore.replicate)
+    const archiveSwarm = await startArchiveSwarm(store, {
       server: opts.server !== false,
       client: opts.client !== false,
       topics: opts.subscribe || []
-    }
+    })
 
-    const swarm = await startSwarm(store, swarmOpts)
-
-    // Set up blob serving on each new connection
-    const origHandler = swarm.swarm.listeners('connection')[0]
-    swarm.swarm.removeAllListeners('connection')
-    swarm.swarm.on('connection', (conn, info) => {
-      if (origHandler) origHandler(conn, info)
+    // Blob swarm: dedicated channel for blob request/serve (no corestore replication)
+    const blobSwarm = await startBlobSwarm((conn, info) => {
       serveBlobs(conn, store)
+    }, {
+      server: opts.server !== false,
+      client: opts.client !== false
     })
 
     console.log(`\nPharos daemon running.`)
-    console.log(`  Drive key:  ${store.drive.key.toString('hex')}`)
-    console.log(`  Bee key:    ${store.bee.core.key.toString('hex')}`)
-    console.log(`  Peers:      ${swarm.peers}`)
-    console.log(`  Topics:     ${['archive', ...swarmOpts.topics].join(', ')}`)
+    console.log(`  Drive key:       ${store.drive.key.toString('hex')}`)
+    console.log(`  Bee key:         ${store.bee.core.key.toString('hex')}`)
+    console.log(`  Archive peers:   ${archiveSwarm.peers}`)
+    console.log(`  Blob transfers: ${blobSwarm.connections.length}`)
+    console.log(`  Topics:          ${['archive', 'blob-transfer', ...opts.subscribe || []].join(', ')}`)
     console.log(`\n  Press Ctrl+C to stop.`)
 
-    // Keep alive
     process.on('SIGINT', async () => {
       console.log('\nShutting down...')
-      await swarm.stop()
+      await stopAll()
       await pharos.close()
       process.exit(0)
     })
@@ -341,23 +339,30 @@ program
     await pharos.initReplicaStore(dataDir, opts.beeKey, opts.driveKey)
     try {
       const { getStore } = require('../core/store')
-      const { startSwarm } = require('../replicate/swarm')
+      const { startArchiveSwarm, startBlobSwarm, stopAll } = require('../replicate/swarm')
       const { requestBlob } = require('../replicate/replicate')
 
       const store = getStore()
-      const swarm = await startSwarm(store, { server: false, client: true })
+
+      // Archive swarm: replicate metadata (Hyperbee/Hyperdrive)
+      const archiveSwarm = await startArchiveSwarm(store, { server: false, client: true })
+
+      // Blob swarm: connect to peer for blob transfer
+      let blobConn = null
+      const blobSwarm = await startBlobSwarm((conn, info) => {
+        blobConn = conn
+      }, { server: false, client: true })
 
       console.log('Waiting for peer connection...')
-      // Wait up to 15s for a peer
       await new Promise(resolve => setTimeout(resolve, 15000))
 
-      if (swarm.peers === 0) {
+      if (archiveSwarm.peers === 0) {
         console.log('No peers found. Is the publisher running `pharos serve`?')
-        await swarm.stop()
+        await stopAll()
         return
       }
 
-      console.log(`Connected to ${swarm.peers} peer(s).`)
+      console.log(`Connected to ${archiveSwarm.peers} archive peer(s).`)
 
       // Wait for bee replication to sync
       console.log('Syncing metadata index...')
@@ -366,23 +371,26 @@ program
       const meta = await pharos.getPaper(paperId)
       if (!meta) {
         console.log(`Paper not found in replicated index: ${paperId}`)
-        await swarm.stop()
+        await stopAll()
         return
       }
 
       console.log(`Title: ${meta.title}`)
       console.log(`Hash: ${meta.content_hash}`)
 
-      // Request the blob from a peer
-      const connections = swarm.swarm.connections
-      if (connections.length === 0) {
-        console.log('No active connections to request blob from.')
-        await swarm.stop()
+      // Wait for blob swarm connection
+      if (!blobConn) {
+        console.log('Waiting for blob transfer connection...')
+        await new Promise(resolve => setTimeout(resolve, 5000))
+      }
+
+      if (!blobConn) {
+        console.log('No blob transfer connection available.')
+        await stopAll()
         return
       }
 
-      const conn = connections[0]
-      const pdf = await requestBlob(conn, meta.content_hash)
+      const pdf = await requestBlob(blobConn, meta.content_hash, 15000)
       if (pdf) {
         const outPath = opts.output || `${paperId.replace(/[:/]/g, '_')}.pdf`
         fs.writeFileSync(outPath, pdf)
@@ -391,7 +399,7 @@ program
         console.log('Failed to fetch blob from peer.')
       }
 
-      await swarm.stop()
+      await stopAll()
     } finally {
       await pharos.close()
     }

@@ -4,6 +4,7 @@
 
 const PHAROS_VERSION = 'pharos-v1'
 const ARCHIVE_TOPIC = `pharos-archive-${PHAROS_VERSION}`
+const BLOB_TRANSFER_TOPIC = `pharos-blob-transfer-${PHAROS_VERSION}`
 
 // Default data directory (relative to project root)
 const DEFAULT_DATA_DIR = 'data'
@@ -35,6 +36,7 @@ const KEY_PREFIX = {
 module.exports = {
   PHAROS_VERSION,
   ARCHIVE_TOPIC,
+  BLOB_TRANSFER_TOPIC,
   DEFAULT_DATA_DIR,
   SQLITE_DB_NAME,
   STORE_DIR,
