@@ -1,0 +1,30 @@
+{
+  "name": "pharos",
+  "version": "0.1.0",
+  "description": "P2P preprint archive using Hypercore/Hyperdrive/Hyperswarm",
+  "main": "src/index.js",
+  "type": "commonjs",
+  "scripts": {
+    "test": "node --test test/",
+    "start": "node src/index.js"
+  },
+  "keywords": [
+    "p2p",
+    "preprint",
+    "hypercore",
+    "hyperswarm",
+    "dweb"
+  ],
+  "author": "Tiago Paixao",
+  "license": "MIT",
+  "dependencies": {
+    "commander": "^12.0.0",
+    "corestore": "^7.12.2",
+    "hyperbee": "^2.0.0",
+    "hypercore": "^10.0.0",
+    "hyperdrive": "^13.3.3",
+    "hyperswarm": "^4.0.0",
+    "pdf-parse": "^1.1.1",
+    "sodium-native": "^4.0.0"
+  }
+}
