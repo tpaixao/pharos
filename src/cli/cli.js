@@ -35,23 +35,36 @@ program
   .requiredOption('--subject <subject>', 'subject category (e.g. q-bio.GN)')
   .option('--abstract <abstract>', 'paper abstract')
   .option('--author <name>', 'author name (repeat for multiple authors)', (v, p) => [...p, v], [])
-  .option('--orcid <orcid>', 'ORCID iD (overrides mock auth)')
+  .option('--orcid <orcid>', 'ORCID iD (overrides OAuth flow)')
+  .option('--orcid-client-id <id>', 'ORCID client ID for OAuth')
+  .option('--orcid-client-secret <secret>', 'ORCID client secret for OAuth')
+  .option('--orcid-sandbox', 'use ORCID sandbox instead of production')
+  .option('--orcid-force', 'force re-authentication (ignore cached credentials)')
   .option('--doi <doi>', 'DOI if already assigned')
   .option('--revises <paper_id>', 'paper_id this is a revision of')
   .action(async (pdf, opts) => {
     await withStore(async () => {
-      // ORCID auth (mock or real)
+      // ORCID auth: explicit iD, real OAuth, or mock fallback
       let signedBy = null
+      let orcidName = null
       if (opts.orcid) {
         signedBy = opts.orcid
       } else {
-        const orcid = await pharos.orcidAuth()
+        const clientId = opts.orcidClientId || process.env.PHAROS_ORCID_CLIENT_ID
+        const clientSecret = opts.orcidClientSecret || process.env.PHAROS_ORCID_CLIENT_SECRET
+        const orcid = await pharos.orcidAuth({
+          clientId,
+          clientSecret,
+          sandbox: opts.orcidSandbox || false,
+          force: opts.orcidForce || false
+        })
         signedBy = orcid.orcid_id
+        orcidName = orcid.orcid_name
       }
 
       const authors = opts.author.length > 0
-        ? opts.author.map(name => ({ name, orcid: name === 'Tiago Paixao' ? signedBy : null }))
-        : [{ name: 'Unknown', orcid: null }]
+        ? opts.author.map(name => ({ name, orcid: name === orcidName ? signedBy : null }))
+        : [{ name: orcidName || 'Unknown', orcid: signedBy }]
 
       const result = await pharos.publish(pdf, {
         title: opts.title,
@@ -207,9 +220,20 @@ program
 // pharos orcid
 program
   .command('orcid')
-  .description('Run ORCID auth (mock in MVP)')
-  .action(async () => {
-    const orcid = await pharos.orcidAuth()
+  .description('Run ORCID OAuth authentication')
+  .option('--orcid-client-id <id>', 'ORCID client ID')
+  .option('--orcid-client-secret <secret>', 'ORCID client secret')
+  .option('--orcid-sandbox', 'use ORCID sandbox')
+  .option('--orcid-force', 'force re-authentication')
+  .action(async (opts) => {
+    const clientId = opts.orcidClientId || process.env.PHAROS_ORCID_CLIENT_ID
+    const clientSecret = opts.orcidClientSecret || process.env.PHAROS_ORCID_CLIENT_SECRET
+    const orcid = await pharos.orcidAuth({
+      clientId,
+      clientSecret,
+      sandbox: opts.orcidSandbox || false,
+      force: opts.orcidForce || false
+    })
     console.log(`ORCID iD: ${orcid.orcid_id}`)
     console.log(`Name: ${orcid.orcid_name}`)
     console.log(`Verified at: ${orcid.orcid_verified_at}`)

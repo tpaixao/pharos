@@ -1,0 +1,123 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Pharos ORCID Callback</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    background: #1a1a2e;
+    color: #e0e0e0;
+    display: flex;
+    min-height: 100vh;
+    align-items: center;
+    justify-content: center;
+  }
+  .container {
+    max-width: 600px;
+    width: 100%;
+    padding: 2rem;
+  }
+  .card {
+    background: #16213e;
+    border-radius: 12px;
+    padding: 2.5rem;
+    box-shadow: 0 4px 20px rgba(0,0,0,0.3);
+  }
+  h1 { font-size: 1.5rem; margin-bottom: 0.5rem; }
+  .subtitle { color: #888; font-size: 0.9rem; margin-bottom: 1.5rem; }
+  .code-block {
+    background: #0d1b2a;
+    border: 1px solid #2a3a5c;
+    border-radius: 8px;
+    padding: 1rem 1.2rem;
+    font-family: "SF Mono", "Fira Code", "Cascadia Code", "Courier New", monospace;
+    font-size: 0.95rem;
+    word-break: break-all;
+    color: #7ec8e3;
+    margin-bottom: 1.5rem;
+    line-height: 1.6;
+  }
+  .code-label { color: #888; font-size: 0.8rem; margin-bottom: 0.4rem; }
+  .instructions {
+    color: #aaa;
+    font-size: 0.85rem;
+    line-height: 1.6;
+    margin-bottom: 1.5rem;
+  }
+  .instructions strong { color: #e0e0e0; }
+  button {
+    background: #4a6fa5;
+    color: white;
+    border: none;
+    border-radius: 6px;
+    padding: 0.7rem 1.5rem;
+    font-size: 0.9rem;
+    cursor: pointer;
+    transition: background 0.2s;
+  }
+  button:hover { background: #5a7fb5; }
+  button:active { background: #3a5f95; }
+  .copy-ok { color: #4ade80; font-size: 0.8rem; margin-left: 0.8rem; }
+  .error { color: #f87171; }
+  .hidden { display: none; }
+</style>
+</head>
+<body>
+<div class="container">
+  <div class="card">
+    <h1>Pharos ORCID Authorization</h1>
+    <div class="subtitle">Peer-to-peer preprint archive</div>
+
+    <div id="success" class="hidden">
+      <div class="code-label">Your authorization code:</div>
+      <div class="code-block" id="auth-code"></div>
+      <div class="instructions">
+        <strong>Copy this code</strong> and paste it into your terminal where <code>pharos publish</code> is waiting.
+      </div>
+      <button id="copy-btn">Copy Code</button>
+      <span class="copy-ok hidden" id="copy-ok">Copied!</span>
+    </div>
+
+    <div id="error-msg" class="hidden">
+      <p class="error">No authorization code found in the URL.</p>
+      <p class="instructions">Make sure you arrived here via the ORCID authorization redirect. If the issue persists, check your ORCID client app configuration.</p>
+    </div>
+  </div>
+</div>
+
+<script>
+(function() {
+  const params = new URLSearchParams(window.location.search);
+  const code = params.get('code');
+  const state = params.get('state');
+
+  if (code) {
+    document.getElementById('success').classList.remove('hidden');
+    document.getElementById('auth-code').textContent = code;
+
+    // Auto-copy to clipboard
+    navigator.clipboard.writeText(code).then(function() {
+      const ok = document.getElementById('copy-ok');
+      ok.classList.remove('hidden');
+    }).catch(function() {});
+
+    // Manual copy button
+    document.getElementById('copy-btn').addEventListener('click', function() {
+      navigator.clipboard.writeText(code).then(function() {
+        const ok = document.getElementById('copy-ok');
+        ok.textContent = 'Copied!';
+        ok.classList.remove('hidden');
+      }).catch(function() {
+        // Fallback: select text
+      });
+    });
+  } else {
+    document.getElementById('error-msg').classList.remove('hidden');
+  }
+})();
+</script>
+</body>
+</html>

@@ -21,8 +21,11 @@ const INDEX_DIR = 'index'
 // Web UI port
 const DEFAULT_WEB_PORT = 8093
 
-// ORCID OAuth callback port (mock in MVP)
+// ORCID OAuth
 const ORCID_CALLBACK_PORT = 8443
+const ORCID_CALLBACK_URL = 'https://tiagopaixao.com/orcid/callback.html'
+const ORCID_PROD = 'https://orcid.org'
+const ORCID_SANDBOX = 'https://sandbox.orcid.org'
 
 // Hyperbee key prefixes
 const KEY_PREFIX = {
@@ -43,5 +46,8 @@ module.exports = {
   INDEX_DIR,
   DEFAULT_WEB_PORT,
   ORCID_CALLBACK_PORT,
+  ORCID_CALLBACK_URL,
+  ORCID_PROD,
+  ORCID_SANDBOX,
   KEY_PREFIX
 }
