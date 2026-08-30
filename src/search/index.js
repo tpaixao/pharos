@@ -19,7 +19,7 @@ function search(query, opts = {}) {
     SELECT
       paper_id,
       title,
-      snippet(papers_fts, 2, '...', '...', 20, 2) as snippet,
+      snippet(papers_fts, 4, '...', '...', 20, 2) as snippet,
       rank
     FROM papers_fts
     WHERE papers_fts MATCH ?

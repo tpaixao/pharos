@@ -390,7 +390,8 @@ test('web: POST /api/publish accepts valid paper via web upload', async () => {
       title: 'Web Upload Paper',
       subject: 'q-bio.GN',
       authors: 'Author One, Author Two',
-      abstract: 'An abstract for the web upload test paper.'
+      abstract: 'An abstract for the web upload test paper.',
+      orcid: '0000-0002-1825-0097'
     }, { pdf: { filename: 'test.pdf', data: makeTestPdf('test') } })
     const res = await postUrl('/api/publish', body.buffer, body.contentType)
     assert.strictEqual(res.status, 200)

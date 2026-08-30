@@ -21,7 +21,7 @@ const { URL } = require('url')
 // Import directly from core modules to avoid circular dependency with lib.js
 const { initStore, getStore, close, getDiskUsage, evictUnpinned } = require('../core/store')
 const { publish, fetchPdf, getPaper, browseCategory, getVersions } = require('../publish/publish')
-const { orcidAuth } = require('../publish/orcid')
+const { orcidAuth, loadCachedOrcid } = require('../publish/orcid')
 const { search } = require('../search/index')
 const { KEY_PREFIX, VALID_SUBJECTS } = require('../core/constants')
 
@@ -257,8 +257,14 @@ async function handlePublish(req, res) {
       authors = fields.authors.split(',').map(a => ({ name: a.trim() })).filter(a => a.name)
     }
 
-    // ORCID auth (cached or mock)
-    const orcid = await orcidAuth()
+    // ORCID auth: cached identity or explicit field; refuse unsigned/na mock
+    let orcid = loadCachedOrcid()
+    if (!orcid && fields.orcid && /^\d{4}-\d{4}-\d{4}-\d{3}[\dX]$/.test(fields.orcid.trim())) {
+      orcid = { orcid_id: fields.orcid.trim(), orcid_name: (fields.authors && fields.authors.split(',')[0].trim()) || 'Unknown', orcid_verified_at: null }
+    }
+    if (!orcid) {
+      return sendJSON(res, { error: 'No ORCID identity available. Authenticate once with `pharos publish` (CLI OAuth), then retry, or pass a verified orcid field.' }, 401)
+    }
 
     const result = await publish(tmpPath, {
       title: fields.title || 'Untitled',
@@ -708,7 +714,7 @@ function renderHomepage() {
         const pid = p.paper_id;
         const date = new Date(p.published_at).toLocaleDateString('en-US', { year: 'numeric', month: 'short', day: 'numeric' });
         const authors = (p.authors || []).map(a => a.name).join(', ');
-        const signed = p.signed_by ? ' <span class="signed-badge">&#9745; ' + p.signed_by + '</span>' : '';
+        const signed = p.signed_by ? ' <span class="signed-badge">&#9745; ' + escapeHtml(p.signed_by) + '</span>' : '';
         const verBadge = p.version > 1 ? '<span class="paper-version">v' + p.version + '</span>' : '';
         const snippet = p._snippet ? '<div class="paper-abstract">' + escapeHtml(p._snippet) + '</div>' : '';
         html += '<div class="paper-card" onclick="window.location.href=\\'/paper/' + encodeURIComponent(pid) + '\\'">' +
@@ -879,7 +885,7 @@ function renderPaperPage(paperId) {
       const authors = (meta.authors || []).map(a => a.name).join(', ');
       const verBadge = meta.version > 1 ? '<span class="version-badge">v' + meta.version + '</span>' : '<span class="version-badge">v1</span>';
       const signed = meta.signed_by ? '<span class="signed">&#9745; Signed by ' + escapeHtml(meta.signed_by) + '</span>' : '';
-      const revises = meta.previous_version_hash ? '<div class="meta-item"><span class="label">Revises:</span> <span class="value">' + meta.previous_version_hash.slice(0, 24) + '...</span></div>' : '';
+      const revises = meta.previous_version_hash ? '<div class="meta-item"><span class="label">Revises:</span> <span class="value">' + escapeHtml(meta.previous_version_hash.slice(0, 24)) + '...</span></div>' : '';
 
       let html = '<div class="paper-id">' + escapeHtml(meta.paper_id) + '</div>';
       html += '<h1>' + escapeHtml(meta.title) + '</h1>';
@@ -925,7 +931,7 @@ function renderPaperPage(paperId) {
       for (const v of versions) {
         const isCurrent = v.paper_id === paperId;
         const date = new Date(v.published_at).toLocaleDateString('en-US', { year: 'numeric', month: 'short', day: 'numeric' });
-        const prev = v.previous_version_hash ? '<div class="version-hash">revises: ' + v.previous_version_hash.slice(0, 24) + '...</div>' : '';
+        const prev = v.previous_version_hash ? '<div class="version-hash">revises: ' + escapeHtml(v.previous_version_hash.slice(0, 24)) + '...</div>' : '';
         const link = isCurrent ? '<span class="version-link">v' + v.version + ' (current)</span>' : '<a class="version-link" href="/paper/' + encodeURIComponent(v.paper_id) + '">v' + v.version + '</a>';
         html += '<div class="version-entry">' +
           '<span class="version-num">' + link + '</span>' +

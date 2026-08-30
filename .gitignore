@@ -3,3 +3,4 @@ data/
 *.logdata_test/
 data/
 .env
+.env.backup*

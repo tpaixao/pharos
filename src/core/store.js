@@ -8,7 +8,7 @@ const { DatabaseSync } = require('node:sqlite')
 const path = require('path')
 const fs = require('fs')
 
-const { SQLITE_DB_NAME, STORE_DIR, INDEX_DIR } = require('./constants')
+const { SQLITE_DB_NAME, STORE_DIR, INDEX_DIR, KEY_PREFIX } = require('./constants')
 
 let storeInstance = null
 
@@ -184,21 +184,19 @@ function dirSize(dirPath) {
   return new Promise((resolve) => {
     let total = 0
     try {
-      const entries = fs.readdirSync(dirPath, { withFileTypes: true })
-      for (const entry of entries) {
-        const full = path.join(dirPath, entry.name)
-        if (entry.isDirectory()) {
-          total += fs.statSync(full).size
-          try {
-            const sub = fs.readdirSync(full, { withFileTypes: true })
-            for (const s of sub) {
-              try { total += fs.statSync(path.join(full, s.name)).size } catch (_) {}
-            }
-          } catch (_) {}
-        } else {
-          try { total += fs.statSync(full).size } catch (_) {}
+      const walk = (dir) => {
+        const entries = fs.readdirSync(dir, { withFileTypes: true })
+        for (const entry of entries) {
+          const full = path.join(dir, entry.name)
+          if (entry.isDirectory()) {
+            try { total += fs.statSync(full).size } catch (_) {}
+            walk(full)
+          } else {
+            try { total += fs.statSync(full).size } catch (_) {}
+          }
         }
       }
+      walk(dirPath)
     } catch (_) {}
     resolve(total)
   })
