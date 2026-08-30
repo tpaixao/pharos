@@ -1,3 +1,4 @@
+const TEST_ORCID = '0000-0003-2361-3953'
 'use strict'
 
 const { test } = require('node:test')
@@ -8,7 +9,6 @@ const fs = require('fs')
 
 const { initStore, close, getStore } = require('../src/core/store')
 const { publish, getVersions } = require('../src/publish/publish')
-const { orcidAuth } = require('../src/publish/orcid')
 
 // Minimal valid PDF for testing
 function makeTestPdf(title) {
@@ -51,13 +51,12 @@ async function withTempStore(fn) {
 
 test('versions: v1 has no previous_version_hash', async () => {
   await withTempStore(async ({ pdfPath }) => {
-    const orcid = await orcidAuth()
-    const result = await publish(pdfPath, {
+        const result = await publish(pdfPath, {
       title: 'Version Test',
       authors: [{ name: 'Author' }],
       abstract: 'Abstract',
       subject: 'q-bio.GN',
-      signedBy: orcid.orcid_id
+      signedBy: TEST_ORCID
     })
     assert.strictEqual(result.version, 1)
     assert.strictEqual(result.duplicate, false)
@@ -70,15 +69,14 @@ test('versions: v1 has no previous_version_hash', async () => {
 
 test('versions: revises creates v2 with correct previous_version_hash', async () => {
   await withTempStore(async ({ pdfPath, pdf2Path }) => {
-    const orcid = await orcidAuth()
-
+    
     // Publish v1
     const r1 = await publish(pdfPath, {
       title: 'Version Test',
       authors: [{ name: 'Author' }],
       abstract: 'V1 abstract',
       subject: 'q-bio.GN',
-      signedBy: orcid.orcid_id
+      signedBy: TEST_ORCID
     })
     assert.strictEqual(r1.version, 1)
 
@@ -88,7 +86,7 @@ test('versions: revises creates v2 with correct previous_version_hash', async ()
       authors: [{ name: 'Author' }],
       abstract: 'V2 abstract with changes',
       subject: 'q-bio.GN',
-      signedBy: orcid.orcid_id,
+      signedBy: TEST_ORCID,
       revises: r1.paper_id
     })
     assert.strictEqual(r2.version, 2)
@@ -111,8 +109,7 @@ test('versions: revises creates v2 with correct previous_version_hash', async ()
 
 test('versions: getVersions returns all versions oldest first', async () => {
   await withTempStore(async ({ pdfPath, pdf2Path }) => {
-    const orcid = await orcidAuth()
-    const tmpDir = path.join(os.tmpdir(), 'pharos-ver3-test-' + Date.now())
+        const tmpDir = path.join(os.tmpdir(), 'pharos-ver3-test-' + Date.now())
     fs.mkdirSync(tmpDir, { recursive: true })
     const pdf3Path = path.join(tmpDir, 'test_v3.pdf')
     fs.writeFileSync(pdf3Path, makeTestPdf('Version Test V3'))
@@ -124,14 +121,14 @@ test('versions: getVersions returns all versions oldest first', async () => {
         authors: [{ name: 'Author' }],
         abstract: 'V1',
         subject: 'q-bio.QM',
-        signedBy: orcid.orcid_id
+        signedBy: TEST_ORCID
       })
       const r2 = await publish(pdf2Path, {
         title: 'Multi Version Paper',
         authors: [{ name: 'Author' }],
         abstract: 'V2',
         subject: 'q-bio.QM',
-        signedBy: orcid.orcid_id,
+        signedBy: TEST_ORCID,
         revises: r1.paper_id
       })
       const r3 = await publish(pdf3Path, {
@@ -139,7 +136,7 @@ test('versions: getVersions returns all versions oldest first', async () => {
         authors: [{ name: 'Author' }],
         abstract: 'V3',
         subject: 'q-bio.QM',
-        signedBy: orcid.orcid_id,
+        signedBy: TEST_ORCID,
         revises: r2.paper_id
       })
 
@@ -168,21 +165,20 @@ test('versions: getVersions returns empty for nonexistent paper', async () => {
 
 test('versions: getVersions works when called from v2 paper_id', async () => {
   await withTempStore(async ({ pdfPath, pdf2Path }) => {
-    const orcid = await orcidAuth()
-
+    
     const r1 = await publish(pdfPath, {
       title: 'Chain Test',
       authors: [{ name: 'Author' }],
       abstract: 'V1',
       subject: 'q-bio.GN',
-      signedBy: orcid.orcid_id
+      signedBy: TEST_ORCID
     })
     const r2 = await publish(pdf2Path, {
       title: 'Chain Test',
       authors: [{ name: 'Author' }],
       abstract: 'V2',
       subject: 'q-bio.GN',
-      signedBy: orcid.orcid_id,
+      signedBy: TEST_ORCID,
       revises: r1.paper_id
     })
 

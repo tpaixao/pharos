@@ -69,7 +69,7 @@ function validateMetadata(meta) {
     if (typeof meta.identity !== 'object' || Array.isArray(meta.identity)) {
       errors.push('identity must be an object')
     } else {
-      const validFlows = ['implicit-openid', 'authorization-code', 'self-asserted', 'unverified']
+      const validFlows = ['implicit-openid', 'self-asserted', 'unverified']
       if (meta.identity.orcid_auth_flow !== undefined &&
           meta.identity.orcid_auth_flow !== null &&
           !validFlows.includes(meta.identity.orcid_auth_flow)) {

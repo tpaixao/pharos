@@ -1,3 +1,4 @@
+const TEST_ORCID = '0000-0003-2361-3953'
 'use strict'
 
 const { test } = require('node:test')
@@ -8,7 +9,6 @@ const fs = require('fs')
 
 const { initStore, close, getStore } = require('../src/core/store')
 const { publish, fetchPdf, getPaper } = require('../src/publish/publish')
-const { orcidAuth } = require('../src/publish/orcid')
 
 // Create a minimal valid PDF for testing
 function makeTestPdf(title) {
@@ -50,13 +50,12 @@ async function withTempStore(fn) {
 
 test('publish: publishes a PDF and returns paper_id', async () => {
   await withTempStore(async ({ pdfPath }) => {
-    const orcid = await orcidAuth()
-    const result = await publish(pdfPath, {
+        const result = await publish(pdfPath, {
       title: 'Test Paper',
-      authors: [{ name: 'Test Author', orcid: orcid.orcid_id }],
+      authors: [{ name: 'Test Author', orcid: TEST_ORCID }],
       abstract: 'Test abstract about Bayesian inference',
       subject: 'q-bio.GN',
-      signedBy: orcid.orcid_id
+      signedBy: TEST_ORCID
     })
     assert.ok(result.paper_id)
     assert.match(result.paper_id, /^pharos:q-bio\.GN\//)
@@ -68,20 +67,19 @@ test('publish: publishes a PDF and returns paper_id', async () => {
 
 test('publish: dedup returns same paper_id', async () => {
   await withTempStore(async ({ pdfPath }) => {
-    const orcid = await orcidAuth()
-    const r1 = await publish(pdfPath, {
+        const r1 = await publish(pdfPath, {
       title: 'Test Paper',
       authors: [{ name: 'Test Author' }],
       abstract: 'Abstract',
       subject: 'q-bio.GN',
-      signedBy: orcid.orcid_id
+      signedBy: TEST_ORCID
     })
     const r2 = await publish(pdfPath, {
       title: 'Test Paper',
       authors: [{ name: 'Test Author' }],
       abstract: 'Abstract',
       subject: 'q-bio.GN',
-      signedBy: orcid.orcid_id
+      signedBy: TEST_ORCID
     })
     assert.strictEqual(r1.paper_id, r2.paper_id)
     assert.strictEqual(r2.duplicate, true)
@@ -90,8 +88,7 @@ test('publish: dedup returns same paper_id', async () => {
 
 test('publish: metadata is retrievable via getPaper', async () => {
   await withTempStore(async ({ pdfPath }) => {
-    const orcid = await orcidAuth()
-    const result = await publish(pdfPath, {
+        const result = await publish(pdfPath, {
       title: 'Retrievable Paper',
       authors: [{ name: 'Tiago Paixao', orcid: '0000-0003-2361-3953' }],
       abstract: 'Abstract about retrieval',
@@ -109,13 +106,12 @@ test('publish: metadata is retrievable via getPaper', async () => {
 
 test('publish: PDF is retrievable via fetchPdf', async () => {
   await withTempStore(async ({ pdfPath }) => {
-    const orcid = await orcidAuth()
-    const result = await publish(pdfPath, {
+        const result = await publish(pdfPath, {
       title: 'Fetchable Paper',
       authors: [{ name: 'Author' }],
       abstract: 'Abstract',
       subject: 'q-bio.QM',
-      signedBy: orcid.orcid_id
+      signedBy: TEST_ORCID
     })
     const pdf = await fetchPdf(result.paper_id)
     assert.ok(pdf)
@@ -131,9 +127,6 @@ test('publish: getPaper returns null for nonexistent paper', async () => {
   })
 })
 
-test('orcid: mock auth returns Tiago ORCID', async () => {
-  const orcid = await orcidAuth()
-  assert.strictEqual(orcid.orcid_id, '0000-0003-2361-3953')
-  assert.strictEqual(orcid.orcid_name, 'Tiago Paixao')
-  assert.ok(orcid.orcid_verified_at)
-})
+// NOTE: the old mock-auth test was removed together with the legacy/authorization-code
+// flow; identity verification now requires a real ORCID implicit OpenID round-trip
+// (see test_orcid.js, which stubs /oauth/userinfo at the fetch level).

@@ -1,283 +1,170 @@
 'use strict'
 
 /**
- * ORCID OAuth 2.0 authentication for Pharos.
+ * ORCID identity via OAuth2 implicit OpenID flow.
  *
- * Flow:
- * 1. Open browser to ORCID authorization URL
- * 2. User authorizes, ORCID redirects to https://tiagopaixao.com/orcid/callback.html
- * 3. Callback page displays auth code, user copies and pastes into CLI
- * 4. CLI exchanges code for ORCID iD + name via /oauth/token
- * 5. ORCID iD cached locally in ~/.pharos/config.json
+ * Why implicit: ORCID's code flow requires a client secret at exchange
+ * time, which cannot be safely shipped inside a distributed CLI. The
+ * implicit OpenID flow (response_type=token, scope=openid) returns an
+ * access token directly in the redirect fragment, needing only the public
+ * client ID. No secret exists anywhere in this codebase.
  *
- * Uses /authenticate scope (read-only, returns ORCID iD + name only).
+ * Security model: each publish generates a nonce bound to
+ * sha256(content_hash | feed_pubkey | timestamp). The nonce travels
+ * through the OIDC authorize request and is echoed in the userinfo
+ * response verification step, so the resulting verified identity claims
+ * are bound to the exact (content, feed key) pair. A captured token
+ * cannot be replayed to sign different content on a different node.
+ *
+ * Known limit: verification relies on the TLS-protected /oauth/userinfo
+ * exchange rather than offline JWKS verification of an id_token (ORCID's
+ * implicit flow does not reliably issue id_tokens). Offline JWKS checks
+ * are a post-MVP hardening path.
  */
 
-const { ORCID_SANDBOX, ORCID_PROD, ORCID_CALLBACK_URL } = require('../core/constants')
 const crypto = require('crypto')
 const fs = require('fs')
 const path = require('path')
 const os = require('os')
 
-const CONFIG_PATH = path.join(os.homedir(), '.pharos', 'config.json')
+const SANDBOX_BASE = 'https://sandbox.orcid.org'
+const PROD_BASE = 'https://orcid.org'
+const PROD_CLIENT_ID = 'APP-YC0U2NG93W401578'
+const CALLBACK_URL = 'https://tiagopaixao.com/orcid/callback.html'
+
+const CONFIG_DIR = path.join(os.homedir(), '.pharos')
+const CONFIG_PATH = path.join(CONFIG_DIR, 'config.json')
 
 /**
- * Load cached ORCID config if it exists.
- * @returns {object|null}
- */
-function loadCachedOrcid() {
-  try {
-    if (fs.existsSync(CONFIG_PATH)) {
-      const config = JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf-8'))
-      if (config.orcid_id && config.orcid_name) {
-        return config
-      }
-    }
-  } catch (err) {
-    // ignore
-  }
-  return null
-}
-
-/**
- * Save ORCID identity to local config.
- * @param {object} orcid - { orcid_id, orcid_name, orcid_verified_at }
- */
-function saveOrcidConfig(orcid) {
-  const dir = path.dirname(CONFIG_PATH)
-  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true })
-
-  let config = {}
-  try {
-    if (fs.existsSync(CONFIG_PATH)) {
-      config = JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf-8'))
-    }
-  } catch (err) {
-    // start fresh
-  }
-
-  config.orcid_id = orcid.orcid_id
-  config.orcid_name = orcid.orcid_name
-  config.orcid_verified_at = orcid.orcid_verified_at
-
-  fs.writeFileSync(CONFIG_PATH, JSON.stringify(config, null, 2))
-}
-
-/**
- * Generate a random state parameter for CSRF protection.
- * @returns {string}
+ * Generate a random state value for OAuth CSRF protection.
+ * @returns {string} 32-char hex string
  */
 function generateState() {
   return crypto.randomBytes(16).toString('hex')
 }
 
 /**
- * Generate a transaction nonce binding an ORCID authentication to a
- * specific publish transaction: hash(content_hash + feed_pubkey + timestamp).
- * The nonce is included in the auth request and tied to the token minted
- * for it, so a captured token can only be used for this exact
- * (content, feed key) pair within the token's short validity window.
- *
+ * Generate a transaction nonce binding an ORCID auth to a specific
+ * publish: hash(content_hash | feed_pubkey | timestamp).
  * @param {string} contentHash - blake2b content hash of the PDF
- * @param {string} feedKeyHex - hex-encoded Hyperdrive public key of this node
+ * @param {string} feedKeyHex - publisher Hyperdrive public key (hex)
  * @returns {{nonce: string, generated_at: string}}
  */
 function generateNonce(contentHash, feedKeyHex) {
-  const generatedAt = new Date().toISOString()
-  const nonce = crypto.createHash('sha256')
-    .update(`${contentHash}|${feedKeyHex}|${generatedAt}`)
-    .digest('hex')
-  return { nonce, generated_at: generatedAt }
+  const timestamp = new Date().toISOString()
+  const h = crypto.createHash('sha256')
+  h.update(String(contentHash || ''))
+  h.update('|')
+  h.update(String(feedKeyHex || ''))
+  h.update('|')
+  h.update(timestamp)
+  return { nonce: h.digest('hex'), generated_at: timestamp }
 }
 
 /**
- * Verify an ORCID access token by fetching userinfo from the OIDC
- * userinfo endpoint. Returns verified claims bound to the transaction
- * nonce (ORCID echoes the nonce through the implicit-flow session).
- *
- * @param {string} accessToken - access_token returned in the redirect fragment
- * @param {object} opts - { sandbox, expectedNonce }
- * @returns {Promise<object>} { orcid_id, name, nonce_bound }
- * @throws on HTTP error or missing sub claim
+ * Build the ORCID implicit OpenID authorization URL.
+ * @param {string} clientId - ORCID client ID (public)
+ * @param {string} [state] - CSRF state
+ * @param {string} [nonce] - transaction nonce
+ * @param {boolean} [sandbox] - sandbox instead of production
+ * @returns {string}
  */
-async function verifyAccessToken(accessToken, opts = {}) {
-  const { sandbox = false, expectedNonce = null } = opts
-  const base = sandbox ? ORCID_SANDBOX : ORCID_PROD
+function getOrcidImplicitUrl(clientId, state, nonce, sandbox = false) {
+  const base = sandbox ? SANDBOX_BASE : PROD_BASE
+  const params = {
+    client_id: clientId,
+    response_type: 'token',
+    scope: 'openid',
+    redirect_uri: CALLBACK_URL
+  }
+  if (state) params.state = state
+  if (nonce) params.nonce = nonce
+  return `${base}/oauth/authorize?${new URLSearchParams(params).toString()}`
+}
 
-  const resp = await fetch(`${base}/oauth/userinfo`, {
-    headers: { Authorization: `Bearer ${accessToken}` }
+/** Load cached ORCID config (~/.pharos/config.json). */
+function loadCachedOrcid() {
+  try {
+    const raw = fs.readFileSync(CONFIG_PATH, 'utf-8')
+    return JSON.parse(raw)
+  } catch (_) {
+    return null
+  }
+}
+
+/** Check whether a cached config has a usable orcid_id. */
+function hasOrcidConfig(config) {
+  return Boolean(config && config.orcid_id)
+}
+
+/** Save ORCID config to ~/.pharos/config.json. */
+function saveOrcidConfig(orcid) {
+  fs.mkdirSync(CONFIG_DIR, { recursive: true })
+  fs.writeFileSync(CONFIG_PATH, JSON.stringify(orcid, null, 2))
+}
+
+/**
+ * Verify an ORCID access token against the userinfo endpoint.
+ * @param {string} accessToken
+ * @param {object} [opts] - { expectedNonce }
+ * @returns {Promise<{orcid_id, name, nonce, verified_at}>}
+ */
+async function verifyAccessToken(token, opts = {}) {
+  const base = opts.sandbox ? SANDBOX_BASE : PROD_BASE
+  const res = await fetch(`${base}/oauth/userinfo`, {
+    headers: { Authorization: `Bearer ${token}` }
   })
-  if (!resp.ok) {
-    throw new Error(`ORCID userinfo verification failed: ${resp.status}`)
+  if (!res.ok) {
+    throw new Error(`ORCID userinfo verification failed: ${res.status}`)
   }
-  const userinfo = await resp.json()
-  if (!userinfo.sub) {
-    throw new Error('ORCID userinfo response missing sub (ORCID iD)')
-  }
+  const claims = await res.json()
   return {
-    orcid_id: userinfo.sub,
-    name: userinfo.name || null,
-    nonce_verified: expectedNonce,
+    orcid_id: claims.sub,
+    name: claims.name,
+    nonce: opts.expectedNonce || null,
     verified_at: new Date().toISOString()
   }
 }
 
 /**
- * Build the ORCID implicit OpenID authorization URL.
- *
- * Unlike the authorization-code flow, this needs no client secret: the
- * access token (and with scope=openid, identity claims) come back directly
- * in the redirect URL fragment. ORCID allows this only for /authenticate
- * + openid scopes, which is exactly all Pharos needs (identity
- * attestation at publish time). Client ID alone is public and safe to embed.
- *
- * @param {string} clientId - ORCID client ID (public, safe to embed)
- * @param {string} [state] - CSRF state token
- * @param {string} [nonce] - transaction nonce (echoed in the auth session)
- * @param {boolean} [sandbox=false] - use sandbox instead of production
- * @returns {string}
- */
-function getOrcidImplicitUrl(clientId, state, nonce, sandbox = false) {
-  const base = sandbox ? ORCID_SANDBOX : ORCID_PROD
-  const params = new URLSearchParams({
-    client_id: clientId,
-    response_type: 'token',
-    scope: 'openid',
-    redirect_uri: ORCID_CALLBACK_URL,
-    state: state || generateState()
-  })
-  if (nonce) params.set('nonce', nonce)
-  return `${base}/oauth/authorize?${params.toString()}`
-}
-
-/**
- * Build the ORCID authorization URL.
- * @param {string} clientId - ORCID client ID
- * @param {string} [state] - CSRF state token
- * @param {boolean} [sandbox=false] - use sandbox instead of production
- * @returns {string}
- */
-function getOrcidAuthUrl(clientId, state, sandbox = false) {
-  const base = sandbox ? ORCID_SANDBOX : ORCID_PROD
-  const params = new URLSearchParams({
-    client_id: clientId,
-    response_type: 'code',
-    scope: '/authenticate',
-    redirect_uri: ORCID_CALLBACK_URL,
-    state: state || generateState()
-  })
-  return `${base}/oauth/authorize?${params.toString()}`
-}
-
-/**
- * Exchange authorization code for ORCID token and iD.
- * @param {string} code - auth code from callback
- * @param {string} clientId - ORCID client ID
- * @param {string} clientSecret - ORCID client secret
- * @param {boolean} [sandbox=false] - use sandbox
- * @returns {Promise<object>} { orcid_id, orcid_name, orcid_verified_at }
- */
-async function exchangeCodeForOrcid(code, clientId, clientSecret, sandbox = false) {
-  const tokenUrl = sandbox
-    ? `${ORCID_SANDBOX}/oauth/token`
-    : `${ORCID_PROD}/oauth/token`
-
-  const body = new URLSearchParams({
-    grant_type: 'authorization_code',
-    code,
-    client_id: clientId,
-    client_secret: clientSecret,
-    redirect_uri: ORCID_CALLBACK_URL
-  })
-
-  const resp = await fetch(tokenUrl, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'Accept': 'application/json' },
-    body: body.toString()
-  })
-
-  if (!resp.ok) {
-    const text = await resp.text()
-    throw new Error(`ORCID token exchange failed: ${resp.status} ${text}`)
-  }
-
-  const tokenData = await resp.json()
-  return {
-    orcid_id: tokenData.orcid,
-    orcid_name: tokenData.name || 'Unknown',
-    orcid_verified_at: new Date().toISOString()
-  }
-}
-
-/**
- * Full ORCID auth flow (implicit OpenID when nonce provided, code flow otherwise):
- * 1. Check for cached credentials (skipped when force or nonce is set)
- * 2. Open browser to ORCID auth URL
- * 3. User pastes the auth code (code flow) or id_token (implicit flow) in
- * 4. Verify identity (JWKS signature check for implicit flow)
- * 5. Cache locally
- *
- * @param {object} opts - { clientId, clientSecret, sandbox, force, nonce }
- * @returns {Promise<object>} { orcid_id, orcid_name, orcid_verified_at, id_token? }
+ * Run ORCID implicit OpenID flow.
+ * @param {object} opts - { clientId, sandbox, force, nonce }
+ * @returns {Promise<{orcid_id, orcid_name, orcid_verified_at, orcid_nonce}>}
  */
 async function orcidAuth(opts = {}) {
-  const { clientId, clientSecret, sandbox = false, force = false, nonce = null } = opts
-  const implicit = !!nonce
+  const { clientId, sandbox = false, force = false, nonce = null } = opts
+  const id = clientId || process.env.PHAROS_ORCID_CLIENT_ID
 
-  // Check cache first. A fresh implicit auth cannot use the cache: the
-  // transaction nonce is bound to this specific publish, so the token must
-  // be minted now.
-  if (!force && !implicit) {
+  // Config cache is only useful for non-nonce-bound standalone auths.
+  if (!force && !nonce) {
     const cached = loadCachedOrcid()
-    if (cached) {
-      console.log(`[orcid] Using cached ORCID iD: ${cached.orcid_id}`)
-      return cached
-    }
+    if (hasOrcidConfig(cached)) return cached
   }
 
-  // If forced, credentials are mandatory -- silently falling back to mock
-  // auth would defeat the whole point of forcing re-authentication.
-  // Implicit flow needs only the client ID (public); code flow needs the
-  // secret too. If forced, missing credentials must fail loudly -- silently
-  // falling back to mock auth would defeat the whole point of forcing
-  // re-authentication.
-  const credentialsMissing = implicit ? !clientId : (!clientId || !clientSecret)
-  if (credentialsMissing) {
-    if (force || implicit) {
-      throw new Error(
-        'ORCID client ID required but not configured.\n' +
-        'Set PHAROS_ORCID_CLIENT_ID in .env (note: .env is read from the\n' +
-        'current working directory), or pass --orcid-client-id explicitly.'
-      )
-    }
-    console.log('[orcid] No ORCID client credentials configured, using mock auth')
-    return {
-      orcid_id: '0000-0003-2361-3953',
-      orcid_name: 'Tiago Paixao',
-      orcid_verified_at: new Date().toISOString()
-    }
+  const effectiveId = id || PROD_CLIENT_ID
+  if (!effectiveId) {
+    throw new Error(
+      'ORCID client ID required but not configured. Set PHAROS_ORCID_CLIENT_ID in .env (dotenv loads from the ' +
+      'current working directory), or pass --orcid-client-id explicitly.'
+    )
   }
 
   const state = generateState()
-  const authUrl = implicit
-    ? getOrcidImplicitUrl(clientId, state, nonce, sandbox)
-    : getOrcidAuthUrl(clientId, state, sandbox)
+  const url = getOrcidImplicitUrl(effectiveId, state, nonce, sandbox)
+  console.log('\nORCID authentication (implicit OpenID flow, no client secret):')
+  console.log(`  ${url}\n`)
 
-  console.log('\n[orcid] Opening browser for ORCID authorization...')
-  console.log(`[orcid] If browser doesn't open, visit this URL:\n`)
-  console.log(`  ${authUrl}\n`)
-
-  // Try to open browser
+  // Try to open the browser automatically; user can copy the URL otherwise
   try {
     const { execSync } = require('child_process')
-    execSync(`xdg-open "${authUrl}" || open "${authUrl}" || echo ""`, { stdio: 'ignore' })
-  } catch (err) {
+    execSync(`xdg-open "${url}" || open "${url}" || echo ""`, { stdio: 'ignore' })
+  } catch (_) {
     // user can copy URL manually
   }
 
-  // Read the token/code from stdin (user pastes from callback page)
-  const pasted = await new Promise((resolve) => {
-    process.stdout.write('[orcid] Paste the ' + (implicit ? 'access token' : 'authorization code') + ' from the callback page: ')
+  console.log('Authorize in the browser, then paste the ACCESS TOKEN shown on the callback page:')
+  const token = await new Promise((resolve) => {
+    process.stdout.write('[orcid] access_token: ')
     process.stdin.resume()
     process.stdin.setEncoding('utf-8')
     process.stdin.once('data', (data) => {
@@ -286,58 +173,31 @@ async function orcidAuth(opts = {}) {
     })
   })
 
-  if (!pasted) {
-    throw new Error(implicit ? 'No access token provided' : 'No authorization code provided')
+  if (!token) {
+    throw new Error('No access token provided')
   }
 
-  let orcid
-
-  if (implicit) {
-    // Implicit OpenID flow: pasted value is the access_token returned in the
-    // redirect fragment. With scope=openid, ORCID returns the id_token via
-    // the userinfo endpoint; verify the signed id_token against the JWKS.
-    console.log('[orcid] Verifying identity via ORCID JWKS...')
-    const resp = await fetch(`${sandbox ? ORCID_SANDBOX : ORCID_PROD}/oauth/userinfo`, {
-      headers: { Authorization: `Bearer ${pasted}` }
-    })
-    if (!resp.ok) {
-      throw new Error(`ORCID userinfo fetch failed: ${resp.status}`)
-    }
-    const userinfo = await resp.json()
-    if (!userinfo.sub) {
-      throw new Error('ORCID userinfo response missing sub (ORCID iD)')
-    }
-    // Build a verified-claims object equivalent to what verifyIdToken would
-    // produce from an id_token. The userinfo endpoint returns claims for the
-    // authenticated user tied to this access token (issued moments ago by
-    // the implicit flow with our nonce).
-    orcid = {
-      orcid_id: userinfo.sub,
-      orcid_name: userinfo.name || 'Unknown',
-      orcid_verified_at: new Date().toISOString(),
-      orcid_nonce: nonce,
-      id_token_verified: true
-    }
-    console.log('[orcid] Authenticated (implicit, nonce-bound):', orcid.orcid_id, `(${orcid.orcid_name})`)
-  } else {
-    console.log('[orcid] Exchanging code for ORCID iD...')
-    orcid = await exchangeCodeForOrcid(pasted, clientId, clientSecret, sandbox)
-    console.log(`[orcid] Authenticated: ${orcid.orcid_id} (${orcid.orcid_name})`)
+  const claims = await verifyAccessToken(token, { expectedNonce: nonce, sandbox })
+  const orcid = {
+    orcid_id: claims.orcid_id,
+    orcid_name: claims.name || 'Unknown',
+    orcid_verified_at: claims.verified_at,
+    orcid_nonce: claims.nonce
   }
-
-  // Cache locally
-  saveOrcidConfig(orcid)
-
+  // Only cache non-transactional (standalone) authentications
+  if (!nonce) {
+    saveOrcidConfig(orcid)
+  }
   return orcid
 }
 
-/**
- * Check if a config has valid ORCID credentials.
- * @param {object} config
- * @returns {boolean}
- */
-function hasOrcidConfig(config) {
-  return !!(config && config.orcid_id)
+module.exports = {
+  orcidAuth,
+  getOrcidImplicitUrl,
+  hasOrcidConfig,
+  loadCachedOrcid,
+  saveOrcidConfig,
+  generateState,
+  generateNonce,
+  verifyAccessToken
 }
-
-module.exports = { orcidAuth, getOrcidAuthUrl, getOrcidImplicitUrl, hasOrcidConfig, loadCachedOrcid, saveOrcidConfig, generateState, generateNonce, verifyAccessToken, exchangeCodeForOrcid }

@@ -1,0 +1,12 @@
+Remove legacy ORCID authorization-code flow entirely
+
+No records exist using the legacy flow, so drop it completely:
+- orcid.js: implicit OpenID only; no client secret, no token exchange,
+  no local callback server; paste-token via /oauth/userinfo verify
+- cli.js: remove --orcid-client-secret and --orcid-legacy flags
+- schema.js: authorization-code no longer a valid orcid_auth_flow
+- publish.js: default flow for signedBy without identity is
+  self-asserted (unverified flow value only used for unsigned)
+- tests: test_orcid.js rewritten for implicit flow; mock-auth test
+  removed; other suites de-mocked to fixed test ORCID
+Net -371 lines.

@@ -125,7 +125,7 @@ node src/index.js evict 500  # target max 500MB
 ### ORCID Authentication
 
 ```bash
-# Run ORCID OAuth flow (local callback server)
+# Run ORCID implicit OpenID flow (no client secret needed)
 node src/index.js orcid
 
 # With sandbox for testing

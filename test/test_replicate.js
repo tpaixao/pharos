@@ -1,3 +1,4 @@
+const TEST_ORCID = '0000-0003-2361-3953'
 'use strict'
 
 const { test } = require('node:test')
@@ -6,7 +7,6 @@ const { sendMessage, readMessages, serveBlobs, requestBlob } = require('../src/r
 const { computeHash } = require('../src/core/hash')
 const { initStore, close, getStore } = require('../src/core/store')
 const { publish } = require('../src/publish/publish')
-const { orcidAuth } = require('../src/publish/orcid')
 const path = require('path')
 const fs = require('fs')
 const os = require('os')
@@ -80,14 +80,13 @@ test('replicate: serveBlobs serves a published blob on request', async () => {
     const pdfPath = path.join(tmpDir, 'test.pdf')
     fs.writeFileSync(pdfPath, makeTestPdf('Replicate Test'))
     
-    const orcid = await orcidAuth()
-    
+        
     const result = await publish(pdfPath, {
       title: 'Replication Test Paper',
       authors: [{ name: 'Test Author', orcid: null }],
       abstract: 'Testing blob serving for replication',
       subject: 'q-bio.GN',
-      signedBy: orcid.orcid_id
+      signedBy: TEST_ORCID
     })
     
     assert.ok(result.paper_id)
@@ -143,14 +142,13 @@ test('replicate: health report tracks at-risk papers', async () => {
     const pdfPath = path.join(tmpDir, 'test.pdf')
     fs.writeFileSync(pdfPath, makeTestPdf('Health Test'))
     
-    const orcid = await orcidAuth()
-    
+        
     const pubResult = await publish(pdfPath, {
       title: 'Health Test Paper',
       authors: [{ name: 'Test', orcid: null }],
       abstract: 'Testing health reports',
       subject: 'q-bio.QM',
-      signedBy: orcid.orcid_id
+      signedBy: TEST_ORCID
     })
     
     const paperId = pubResult.paper_id
@@ -192,13 +190,12 @@ test('replicate: pin_announce records replica in publisher index', async () => {
     const pdfPath = path.join(tmpDir, 'test.pdf')
     fs.writeFileSync(pdfPath, makeTestPdf('Pin Announce Test'))
 
-    const orcid = await orcidAuth()
-    const result = await publish(pdfPath, {
+        const result = await publish(pdfPath, {
       title: 'Pin Announce Test Paper',
       authors: [{ name: 'Test Author', orcid: null }],
       abstract: 'Testing pin announcements',
       subject: 'q-bio.GN',
-      signedBy: orcid.orcid_id
+      signedBy: TEST_ORCID
     })
 
     const { addReplica } = require('../src/replicate/health')

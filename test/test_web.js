@@ -1,3 +1,4 @@
+const TEST_ORCID = '0000-0003-2361-3953'
 'use strict'
 
 const { test } = require('node:test')
@@ -127,15 +128,14 @@ startxref
 }
 
 async function publishTestPaper(title, subject) {
-  const orcid = await pharos.orcidAuth()
-  const pdfPath = path.join(tmpDir, 'test.pdf')
+    const pdfPath = path.join(tmpDir, 'test.pdf')
   fs.writeFileSync(pdfPath, makeTestPdf(title))
   const result = await pharos.publish(pdfPath, {
     title,
     authors: [{ name: 'Test Author' }],
     abstract: 'Test abstract for ' + title,
     subject: subject || 'q-bio.GN',
-    signedBy: orcid.orcid_id
+    signedBy: TEST_ORCID
   })
   return result
 }

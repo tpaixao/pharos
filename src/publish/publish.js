@@ -73,7 +73,7 @@ async function publish(pdfPath, opts) {
     hyperdrive_key: drive.key.toString('hex'),
     signed_by: opts.signedBy || null,
     identity: opts.identity || {
-      orcid_auth_flow: opts.signedBy ? 'unverified' : null,
+      orcid_auth_flow: opts.signedBy ? 'self-asserted' : 'unverified',
       orcid_verified_at: null,
       orcid_nonce: null
     },

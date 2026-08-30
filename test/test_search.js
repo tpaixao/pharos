@@ -1,3 +1,4 @@
+const TEST_ORCID = '0000-0003-2361-3953'
 'use strict'
 
 const { test } = require('node:test')
@@ -9,7 +10,6 @@ const fs = require('fs')
 const { initStore, close } = require('../src/core/store')
 const { search, rebuildIndex } = require('../src/search/index')
 const { publish } = require('../src/publish/publish')
-const { orcidAuth } = require('../src/publish/orcid')
 
 function makeTestPdf(title, body) {
   return Buffer.from(`%PDF-1.4
@@ -46,8 +46,7 @@ async function withTempStore(fn) {
 
 test('search: FTS5 finds paper by title', async () => {
   await withTempStore(async ({ tmpDir }) => {
-    const orcid = await orcidAuth()
-    const pdfPath = path.join(tmpDir, 'p1.pdf')
+        const pdfPath = path.join(tmpDir, 'p1.pdf')
     fs.writeFileSync(pdfPath, makeTestPdf('Bayesian inference for genomics', 'Some body text'))
 
     await publish(pdfPath, {
@@ -55,7 +54,7 @@ test('search: FTS5 finds paper by title', async () => {
       authors: [{ name: 'Author' }],
       abstract: 'Bayesian methods for genomic data analysis',
       subject: 'q-bio.GN',
-      signedBy: orcid.orcid_id
+      signedBy: TEST_ORCID
     })
 
     const results = search('bayesian')
@@ -66,8 +65,7 @@ test('search: FTS5 finds paper by title', async () => {
 
 test('search: FTS5 ranks relevant results higher', async () => {
   await withTempStore(async ({ tmpDir }) => {
-    const orcid = await orcidAuth()
-
+    
     const p1 = path.join(tmpDir, 'p1.pdf')
     fs.writeFileSync(p1, makeTestPdf('Single cell RNA-seq analysis', 'single cell methods'))
     await publish(p1, {
@@ -75,7 +73,7 @@ test('search: FTS5 ranks relevant results higher', async () => {
       authors: [{ name: 'A' }],
       abstract: 'single cell transcriptomics methods',
       subject: 'q-bio.GN',
-      signedBy: orcid.orcid_id
+      signedBy: TEST_ORCID
     })
 
     const p2 = path.join(tmpDir, 'p2.pdf')
@@ -85,7 +83,7 @@ test('search: FTS5 ranks relevant results higher', async () => {
       authors: [{ name: 'B' }],
       abstract: 'Plant ecology and biodiversity',
       subject: 'q-bio.GN',
-      signedBy: orcid.orcid_id
+      signedBy: TEST_ORCID
     })
 
     const results = search('single cell')
@@ -103,8 +101,7 @@ test('search: no results returns empty array', async () => {
 
 test('rebuildIndex: rebuilds from Hyperbee', async () => {
   await withTempStore(async ({ tmpDir }) => {
-    const orcid = await orcidAuth()
-
+    
     const p1 = path.join(tmpDir, 'p1.pdf')
     fs.writeFileSync(p1, makeTestPdf('Protein folding dynamics', 'folding dynamics body'))
     await publish(p1, {
@@ -112,7 +109,7 @@ test('rebuildIndex: rebuilds from Hyperbee', async () => {
       authors: [{ name: 'A' }],
       abstract: 'Protein folding and dynamics simulation',
       subject: 'q-bio.GN',
-      signedBy: orcid.orcid_id
+      signedBy: TEST_ORCID
     })
 
     // Search should work before rebuild
