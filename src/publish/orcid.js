@@ -133,7 +133,6 @@ async function verifyAccessToken(token, opts = {}) {
  */
 async function orcidAuth(opts = {}) {
   const { clientId, sandbox = false, force = false, nonce = null } = opts
-  const id = clientId || process.env.PHAROS_ORCID_CLIENT_ID
 
   // Config cache is only useful for non-nonce-bound standalone auths.
   if (!force && !nonce) {
@@ -141,13 +140,9 @@ async function orcidAuth(opts = {}) {
     if (hasOrcidConfig(cached)) return cached
   }
 
-  const effectiveId = id || PROD_CLIENT_ID
-  if (!effectiveId) {
-    throw new Error(
-      'ORCID client ID required but not configured. Set PHAROS_ORCID_CLIENT_ID in .env (dotenv loads from the ' +
-      'current working directory), or pass --orcid-client-id explicitly.'
-    )
-  }
+  // Client ID is public (implicit OpenID flow, no secret); baked into the repo.
+  // Override with --orcid-client-id only for sandbox or alternate clients.
+  const effectiveId = clientId || PROD_CLIENT_ID
 
   const state = generateState()
   const url = getOrcidImplicitUrl(effectiveId, state, nonce, sandbox)

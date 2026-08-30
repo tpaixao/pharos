@@ -57,7 +57,7 @@ program
         }
         console.warn('[publish] WARNING: --orcid is self-asserted; the identity claim is not verified by ORCID')
       } else {
-        const clientId = opts.orcidClientId || process.env.PHAROS_ORCID_CLIENT_ID
+        const clientId = opts.orcidClientId
         const store = pharos.getStore()
 
         // Transaction nonce binds the ORCID auth to THIS publish:
@@ -272,7 +272,7 @@ program
   .option('--orcid-sandbox', 'use ORCID sandbox')
   .option('--orcid-force', 'force re-authentication (ignore cached credentials)')
   .action(async (opts) => {
-    const clientId = opts.orcidClientId || process.env.PHAROS_ORCID_CLIENT_ID
+    const clientId = opts.orcidClientId
     // Standalone `pharos orcid` has no publish transaction to bind to, so
     // no nonce is passed (null); identity proof still comes from ORCID's
     // signed session, just not content-bound. Result is cached.
