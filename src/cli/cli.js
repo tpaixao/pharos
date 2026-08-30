@@ -36,30 +36,72 @@ program
   .option('--abstract <abstract>', 'paper abstract')
   .option('--author <name>', 'author name (repeat for multiple authors)', (v, p) => [...p, v], [])
   .option('--orcid <orcid>', 'ORCID iD (overrides OAuth flow)')
-  .option('--orcid-client-id <id>', 'ORCID client ID for OAuth')
-  .option('--orcid-client-secret <secret>', 'ORCID client secret for OAuth')
+  .option('--orcid-client-id <id>', 'ORCID client ID for implicit OpenID flow (public, no secret needed)')
+  .option('--orcid-client-secret <secret>', 'ORCID client secret (only for legacy code flow)')
   .option('--orcid-sandbox', 'use ORCID sandbox instead of production')
   .option('--orcid-force', 'force re-authentication (ignore cached credentials)')
+  .option('--orcid-legacy', 'use the legacy authorization-code flow (requires client secret) instead of implicit OpenID')
   .option('--doi <doi>', 'DOI if already assigned')
   .option('--revises <paper_id>', 'paper_id this is a revision of')
   .action(async (pdf, opts) => {
     await withStore(async () => {
-      // ORCID auth: explicit iD, real OAuth, or mock fallback
+      // ORCID auth: explicit iD, implicit OpenID (default), legacy code flow, or mock fallback
       let signedBy = null
       let orcidName = null
+      let identity = null
       if (opts.orcid) {
         signedBy = opts.orcid
+        identity = {
+          orcid_auth_flow: 'self-asserted',
+          orcid_verified_at: null,
+          orcid_nonce: null
+        }
+        console.warn('[publish] WARNING: --orcid is self-asserted; the identity claim is not verified by ORCID')
       } else {
         const clientId = opts.orcidClientId || process.env.PHAROS_ORCID_CLIENT_ID
         const clientSecret = opts.orcidClientSecret || process.env.PHAROS_ORCID_CLIENT_SECRET
-        const orcid = await pharos.orcidAuth({
-          clientId,
-          clientSecret,
-          sandbox: opts.orcidSandbox || false,
-          force: opts.orcidForce || false
-        })
+        const store = pharos.getStore()
+
+        // Transaction nonce binds the ORCID auth to THIS publish:
+        // hash(content_hash | feed_pubkey | timestamp), echoed through the
+        // OIDC session so the resulting verified claims are useless for any
+        // other content or feed key.
+        const crypto = require('crypto')
+        const contentHash = pharos.computeHash(fs.readFileSync(pdf))
+        const feedKeyHex = store.drive.key.toString('hex')
+        const { nonce } = pharos.generateNonce(contentHash, feedKeyHex)
+
+        const useImplicit = !opts.orcidLegacy
+        const force = opts.orcidForce || false
+
+        // Implicit flow mints a fresh nonce-bound token every publish, so
+        // cached identity is only used when the caller forces the legacy
+        // path with an explicit cache-friendly --orcid or explicit no-force
+        // legacy invocation.
+        let orcid
+        if (useImplicit) {
+          orcid = await pharos.orcidAuth({
+            clientId,
+            clientSecret,
+            sandbox: opts.orcidSandbox || false,
+            force,
+            nonce
+          })
+        } else {
+          orcid = await pharos.orcidAuth({
+            clientId,
+            clientSecret,
+            sandbox: opts.orcidSandbox || false,
+            force
+          })
+        }
         signedBy = orcid.orcid_id
         orcidName = orcid.orcid_name
+        identity = {
+          orcid_auth_flow: useImplicit ? 'implicit-openid' : 'authorization-code',
+          orcid_verified_at: orcid.orcid_verified_at,
+          orcid_nonce: useImplicit ? nonce : null
+        }
       }
 
       const authors = opts.author.length > 0
@@ -72,6 +114,7 @@ program
         abstract: opts.abstract || '',
         subject: opts.subject,
         signedBy,
+        identity,
         doi: opts.doi,
         revises: opts.revises
       })
@@ -245,23 +288,36 @@ program
 // pharos orcid
 program
   .command('orcid')
-  .description('Run ORCID OAuth authentication')
+  .description('Run ORCID authentication (implicit OpenID by default, no secret needed)')
   .option('--orcid-client-id <id>', 'ORCID client ID')
-  .option('--orcid-client-secret <secret>', 'ORCID client secret')
+  .option('--orcid-client-secret <secret>', 'ORCID client secret (legacy code flow only)')
   .option('--orcid-sandbox', 'use ORCID sandbox')
   .option('--orcid-force', 'force re-authentication')
+  .option('--orcid-legacy', 'use the legacy authorization-code flow (requires client secret)')
   .action(async (opts) => {
     const clientId = opts.orcidClientId || process.env.PHAROS_ORCID_CLIENT_ID
     const clientSecret = opts.orcidClientSecret || process.env.PHAROS_ORCID_CLIENT_SECRET
+    const useImplicit = !opts.orcidLegacy
+    // Standalone `pharos orcid` has no publish transaction to bind to, so
+    // no nonce is passed (null); identity proof still comes from ORCID's
+    // signed session, just not content-bound.
     const orcid = await pharos.orcidAuth({
       clientId,
       clientSecret,
       sandbox: opts.orcidSandbox || false,
-      force: opts.orcidForce || false
+      force: opts.orcidForce || false,
+      nonce: null
     })
     console.log(`ORCID iD: ${orcid.orcid_id}`)
     console.log(`Name: ${orcid.orcid_name}`)
     console.log(`Verified at: ${orcid.orcid_verified_at}`)
+    if (useImplicit && clientId) {
+      console.log('Flow: implicit OpenID (no client secret used)')
+    } else if (clientId && clientSecret) {
+      console.log('Flow: authorization code')
+    } else {
+      console.log('Flow: mock (no credentials configured)')
+    }
   })
 
 // pharos rebuild-index

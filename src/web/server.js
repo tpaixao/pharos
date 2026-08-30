@@ -266,6 +266,13 @@ async function handlePublish(req, res) {
       return sendJSON(res, { error: 'No ORCID identity available. Authenticate once with `pharos publish` (CLI OAuth), then retry, or pass a verified orcid field.' }, 401)
     }
 
+    // Identity provenance: cached identity came from a CLI ORCID session;
+    // a self-pasted orcid field is unverified (flagged, not rejected --
+    // consistent with the CLI's --orcid escape hatch).
+    const identity = orcid.orcid_verified_at
+      ? { orcid_auth_flow: 'implicit-openid', orcid_verified_at: orcid.orcid_verified_at, orcid_nonce: orcid.orcid_nonce || null }
+      : { orcid_auth_flow: 'self-asserted', orcid_verified_at: orcid.orcid_verified_at || null, orcid_nonce: null }
+
     const result = await publish(tmpPath, {
       title: fields.title || 'Untitled',
       authors,
@@ -273,7 +280,8 @@ async function handlePublish(req, res) {
       subject: fields.subject || 'q-bio.GN',
       doi: fields.doi || null,
       revises: fields.revises || null,
-      signedBy: orcid.orcid_id
+      signedBy: orcid.orcid_id,
+      identity
     })
 
     return sendJSON(res, {

@@ -72,7 +72,7 @@
     <div class="subtitle">Peer-to-peer preprint archive</div>
 
     <div id="success" class="hidden">
-      <div class="code-label">Your authorization code:</div>
+      <div class="code-label" id="code-label">Your authorization code:</div>
       <div class="code-block" id="auth-code"></div>
       <div class="instructions">
         <strong>Copy this code</strong> and paste it into your terminal where <code>pharos publish</code> is waiting.
@@ -90,24 +90,31 @@
 
 <script>
 (function() {
-  const params = new URLSearchParams(window.location.search);
-  const code = params.get('code');
-  const state = params.get('state');
+  // ORCID implicit OpenID flow returns tokens in the URL FRAGMENT
+  // (#access_token=...), not the query string. Query params (?code=...)
+  // are used by the legacy authorization-code flow. Support both.
+  var fragment = new URLSearchParams(window.location.hash.substring(1));
+  var params = new URLSearchParams(window.location.search);
+  var token = fragment.get('access_token');
+  var code = params.get('code');
+  var value = token || code;
+  var label = token ? 'Your access token:' : 'Your authorization code:';
 
-  if (code) {
+  if (value) {
     document.getElementById('success').classList.remove('hidden');
-    document.getElementById('auth-code').textContent = code;
+    document.getElementById('code-label').textContent = label;
+    document.getElementById('auth-code').textContent = value;
 
     // Auto-copy to clipboard
-    navigator.clipboard.writeText(code).then(function() {
-      const ok = document.getElementById('copy-ok');
+    navigator.clipboard.writeText(value).then(function() {
+      var ok = document.getElementById('copy-ok');
       ok.classList.remove('hidden');
     }).catch(function() {});
 
     // Manual copy button
     document.getElementById('copy-btn').addEventListener('click', function() {
-      navigator.clipboard.writeText(code).then(function() {
-        const ok = document.getElementById('copy-ok');
+      navigator.clipboard.writeText(value).then(function() {
+        var ok = document.getElementById('copy-ok');
         ok.textContent = 'Copied!';
         ok.classList.remove('hidden');
       }).catch(function() {

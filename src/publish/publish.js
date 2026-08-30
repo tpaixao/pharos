@@ -72,6 +72,11 @@ async function publish(pdfPath, opts) {
     blob_key: pdfBlobKey,
     hyperdrive_key: drive.key.toString('hex'),
     signed_by: opts.signedBy || null,
+    identity: opts.identity || {
+      orcid_auth_flow: opts.signedBy ? 'unverified' : null,
+      orcid_verified_at: null,
+      orcid_nonce: null
+    },
     published_at: now,
     first_seen: now,
     replicated_by: [drive.key.toString('hex')]

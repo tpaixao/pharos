@@ -35,10 +35,88 @@ test('orcid: mock auth returns Tiago ORCID when no credentials', async () => {
   assert.ok(orcid.orcid_verified_at)
 })
 
-test('orcid: explicit --orcid overrides OAuth flow', async () => {
-  // When opts.orcid is provided on CLI, orcidAuth is not called
-  const orcid = await orcidAuth({ force: true })
-  assert.ok(orcid.orcid_id)
+test('orcid: force with missing credentials throws instead of mock fallback', async () => {
+  await assert.rejects(
+    orcidAuth({ force: true }),
+    /ORCID client ID required but not configured/
+  )
+})
+
+test('orcid: implicit flow with missing client ID throws', async () => {
+  await assert.rejects(
+    orcidAuth({ nonce: 'abc' }),
+    /ORCID client ID required but not configured/
+  )
+})
+
+test('orcid: generateNonce produces deterministic 64-char hex', () => {
+  const { generateNonce } = require('../src/publish/orcid')
+  const r = generateNonce('abc123', 'feedkey')
+  assert.strictEqual(r.nonce.length, 64)
+  assert.match(r.nonce, /^[0-9a-f]{64}$/)
+  assert.ok(r.generated_at)
+})
+
+test('orcid: generateNonce binds content+feedKey (+timestamp)', () => {
+  const { generateNonce } = require('../src/publish/orcid')
+  const a = generateNonce('content-a', 'feedkey-1')
+  const b = generateNonce('content-b', 'feedkey-1')
+  const c = generateNonce('content-a', 'feedkey-2')
+  assert.notStrictEqual(a.nonce, b.nonce, 'different content must give different nonce')
+  assert.notStrictEqual(a.nonce, c.nonce, 'different feed key must give different nonce')
+})
+
+test('orcid: getOrcidImplicitUrl builds implicit OpenID URL with nonce', () => {
+  const { getOrcidImplicitUrl } = require('../src/publish/orcid')
+  const state = generateState()
+  const url = getOrcidImplicitUrl('APP-TEST123', state, 'nonce-xyz', false)
+  assert.ok(url.startsWith('https://orcid.org/oauth/authorize?'))
+  assert.ok(url.includes('client_id=APP-TEST123'))
+  assert.ok(url.includes('response_type=token'))
+  assert.ok(url.includes('scope=openid'))
+  assert.ok(url.includes(`state=${state}`))
+  assert.ok(url.includes('nonce=nonce-xyz'))
+  assert.ok(url.includes('redirect_uri=https%3A%2F%2Ftiagopaixao.com%2Forcid%2Fcallback.html'))
+})
+
+test('orcid: getOrcidImplicitUrl sandbox variant', () => {
+  const { getOrcidImplicitUrl } = require('../src/publish/orcid')
+  const url = getOrcidImplicitUrl('APP-TEST456', undefined, undefined, true)
+  assert.ok(url.startsWith('https://sandbox.orcid.org/oauth/authorize?'))
+  assert.ok(url.includes('response_type=token'))
+  assert.ok(url.includes('state='))
+})
+
+test('orcid: verifyAccessToken throws on userinfo failure', async () => {
+  const { verifyAccessToken } = require('../src/publish/orcid')
+  const origFetch = global.fetch
+  global.fetch = async () => ({ ok: false, status: 401 })
+  try {
+    await assert.rejects(
+      verifyAccessToken('bad-token'),
+      /ORCID userinfo verification failed: 401/
+    )
+  } finally {
+    global.fetch = origFetch
+  }
+})
+
+test('orcid: verifyAccessToken returns verified claims on success', async () => {
+  const { verifyAccessToken } = require('../src/publish/orcid')
+  const origFetch = global.fetch
+  global.fetch = async () => ({
+    ok: true,
+    json: async () => ({ sub: '0000-0002-1694-233X', name: 'Test Author' })
+  })
+  try {
+    const claims = await verifyAccessToken('tok', { expectedNonce: 'n1' })
+    assert.strictEqual(claims.orcid_id, '0000-0002-1694-233X')
+    assert.strictEqual(claims.name, 'Test Author')
+    assert.strictEqual(claims.nonce_verified, 'n1')
+    assert.ok(claims.verified_at)
+  } finally {
+    global.fetch = origFetch
+  }
 })
 
 test('orcid: generateState returns 32-char hex string', () => {

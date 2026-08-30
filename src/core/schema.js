@@ -64,6 +64,26 @@ function validateMetadata(meta) {
     }
   }
 
+  // identity: provenance of the signed_by claim
+  if (meta.identity !== null && meta.identity !== undefined) {
+    if (typeof meta.identity !== 'object' || Array.isArray(meta.identity)) {
+      errors.push('identity must be an object')
+    } else {
+      const validFlows = ['implicit-openid', 'authorization-code', 'self-asserted', 'unverified']
+      if (meta.identity.orcid_auth_flow !== undefined &&
+          meta.identity.orcid_auth_flow !== null &&
+          !validFlows.includes(meta.identity.orcid_auth_flow)) {
+        errors.push(`identity.orcid_auth_flow must be one of: ${validFlows.join(', ')}`)
+      }
+      for (const field of ['orcid_verified_at', 'orcid_nonce']) {
+        const v = meta.identity[field]
+        if (v !== undefined && v !== null && typeof v !== 'string') {
+          errors.push(`identity.${field} must be a string or null`)
+        }
+      }
+    }
+  }
+
   return { valid: errors.length === 0, errors }
 }
 
