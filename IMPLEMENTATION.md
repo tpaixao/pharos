@@ -400,6 +400,25 @@ The build order is designed to produce a working vertical slice (publish a PDF, 
 
 **Deliverable:** Hardened two-node system with security headers, input validation, graceful shutdown, storage management, and full documentation.
 
+### Weekend 6 (planned): Replica Health — Liveness, Not Ghosts
+
+**Problem:** `replicated_by` is written by the serve daemon's pin-announce handler (wired up in commit 4c1e215), but it is a monotonic claim with no expiry. A peer that pins a paper and later drops it stays in `replicated_by` forever. The 3-replica health threshold (`replicate/health.js`, `MIN_REPLICAS = 3`) therefore counts ghosts: the health report can report a paper "healthy" based on peers that no longer hold the blob. `pinPaper()` re-validates only the local node's own pin (blob exists + BLAKE2b hash match); nothing re-validates remote peers' claims.
+
+**Goal:** Make `replicated_by` a liveness signal — a peer is only counted as a replica while it keeps re-announcing.
+
+**Design sketch:**
+
+1. **Periodic re-announcement**: the serve daemon re-sends `pin_announce` on every peer connection (already does) AND re-connects / re-announces on a timer (e.g., every 6 hours). Each announcement carries `announced_at` (ISO timestamp).
+2. **Decay rule**: when handling `pin_announce`, the receiver refreshes `replicated_by` with a per-peer timestamp instead of just a key string. Store as `replicas: [{peer_key, last_seen}]`. On `addReplica()`, upsert `last_seen`.
+3. **Decay sweep**: on serve daemon start and every hour, drop entries with `last_seen` older than `REPLICA_TTL` (default 24h = 4 missed announcements). Runs alongside the existing eviction logic.
+4. **Semantics change**: `healthReport()` counts only non-expired entries. A paper whose replicas all went quiet correctly degrades to at-risk.
+5. **Announce message upgrade**: `pin_announce` becomes `{type, hashes, peer_key, announced_at}`. Backward compatible: receivers treat missing `announced_at` as "now" (old peers still work one cycle).
+6. **Self-pin stays permanent**: the publishing node's own key in `replicated_by` is exempt from decay (it re-verifies via `pinPaper()` hash checks instead).
+
+**Tests:** re-announce refreshes `last_seen`; TTL sweep drops stale entries; health report flips healthy → at-risk when all replicas expire; old-style announce (no timestamp) still accepted.
+
+**Deliverable:** Replica claims that expire when peers go silent; health threshold reflects reality.
+
 ## Testing Strategy
 
 All tests use Node's built-in `node:test` runner (no Jest dependency).
