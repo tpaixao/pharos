@@ -414,10 +414,11 @@ The build order is designed to produce a working vertical slice (publish a PDF, 
 4. **Semantics change**: `healthReport()` counts only non-expired entries. A paper whose replicas all went quiet correctly degrades to at-risk.
 5. **Announce message upgrade**: `pin_announce` becomes `{type, hashes, peer_key, announced_at}`. Backward compatible: receivers treat missing `announced_at` as "now" (old peers still work one cycle).
 6. **Self-pin stays permanent**: the publishing node's own key in `replicated_by` is exempt from decay (it re-verifies via `pinPaper()` hash checks instead).
+7. **Local claim recording (removes publisher dependency)**: any node that handles `pin_announce` writes the claim to its OWN local metadata copy, not only the publisher's. Today the announce handler merges into the publisher's `replicated_by` and waits for metadata replication to spread it, which makes the publisher a single point of recording: its serve daemon being down freezes all replica-claim recording. With per-node recording, every node holds a first-hand claim in its local Hyperbee, and the existing content-hash merge dedups them across nodes. Claims now propagate P2P and survive publisher downtime (a publisher outage delays propagation but does not freeze or lose recording).
 
-**Tests:** re-announce refreshes `last_seen`; TTL sweep drops stale entries; health report flips healthy → at-risk when all replicas expire; old-style announce (no timestamp) still accepted.
+**Tests:** re-announce refreshes `last_seen`; TTL sweep drops stale entries; health report flips healthy → at-risk when all replicas expire; old-style announce (no timestamp) still accepted; a node other than the publisher that receives `pin_announce` records the claim in its own metadata (publisher offline does not block recording); locally recorded claims from different nodes merge/dedup via content-hash merge.
 
-**Deliverable:** Replica claims that expire when peers go silent; health threshold reflects reality.
+**Deliverable:** Replica claims that expire when peers go silent and are recorded by every receiving node, not only the publisher; health threshold reflects reality.
 
 ## Testing Strategy
 
