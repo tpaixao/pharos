@@ -153,8 +153,17 @@ async function orcidAuth(opts = {}) {
     }
   }
 
-  // If no client credentials, fall back to mock for dev
+  // If forced, credentials are mandatory -- silently falling back to mock
+  // auth would defeat the whole point of forcing re-authentication.
   if (!clientId || !clientSecret) {
+    if (force) {
+      throw new Error(
+        'ORCID client credentials required but not configured.\n' +
+        'Set PHAROS_ORCID_CLIENT_ID and PHAROS_ORCID_CLIENT_SECRET in .env\n' +
+        '(note: .env is read from the current working directory), or pass\n' +
+        '--orcid-client-id / --orcid-client-secret explicitly.'
+      )
+    }
     console.log('[orcid] No ORCID client credentials configured, using mock auth')
     return {
       orcid_id: '0000-0003-2361-3953',
