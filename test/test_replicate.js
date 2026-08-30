@@ -183,3 +183,56 @@ test('replicate: health report tracks at-risk papers', async () => {
     fs.rmSync(tmpDir, { recursive: true, force: true })
   }
 })
+
+test('replicate: pin_announce records replica in publisher index', async () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'pharos-repl-test-'))
+  try {
+    await freshStore(tmpDir)
+
+    const pdfPath = path.join(tmpDir, 'test.pdf')
+    fs.writeFileSync(pdfPath, makeTestPdf('Pin Announce Test'))
+
+    const orcid = await orcidAuth()
+    const result = await publish(pdfPath, {
+      title: 'Pin Announce Test Paper',
+      authors: [{ name: 'Test Author', orcid: null }],
+      abstract: 'Testing pin announcements',
+      subject: 'q-bio.GN',
+      signedBy: orcid.orcid_id
+    })
+
+    const { addReplica } = require('../src/replicate/health')
+
+    // Simulate a peer announcing its pins (as the serve daemon now does)
+    const [client, serverSock] = createStreamPair()
+    const store = getStore()
+
+    const recorded = []
+    serveBlobs(serverSock, store, {
+      onPinAnnounce: async (paperId, peerKey) => {
+        recorded.push(paperId)
+        await addReplica(paperId, peerKey)
+      }
+    })
+
+    sendMessage(client, {
+      type: 'pin_announce',
+      hashes: [result.content_hash, 'blake2b:unknown-hash'],
+      peer_key: 'peer-1234'
+    })
+
+    await new Promise(r => setTimeout(r, 200))
+
+    // The known hash should be recorded as a replica
+    assert.deepEqual(recorded, [result.paper_id])
+
+    const meta = await store.bee.get(`paper:${result.paper_id}`)
+    assert.ok(meta.value.replicated_by.includes('peer-1234'))
+
+    client.destroy()
+    serverSock.destroy()
+  } finally {
+    await close()
+    fs.rmSync(tmpDir, { recursive: true, force: true })
+  }
+})

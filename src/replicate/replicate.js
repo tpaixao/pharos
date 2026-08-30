@@ -76,11 +76,30 @@ function readMessages(stream, onMessage) {
  *
  * @param {Duplex} stream - dedicated blob transfer connection (NOT a corestore replication stream)
  * @param {object} store - store instance
+ * @param {object} [opts] - { onPinAnnounce: async (paperId, peerKey) => void }
  */
-function serveBlobs(stream, store) {
+function serveBlobs(stream, store, opts = {}) {
   const { bee, drive } = store
 
   readMessages(stream, async (msg) => {
+    if (msg.type === 'pin_announce') {
+      // Map announced content hashes to paper IDs and record the replica.
+      const peerKey = msg.peer_key || 'unknown'
+      for (const hash of msg.hashes || []) {
+        try {
+          const entry = await bee.get(`${KEY_PREFIX.HASH}${hash}`)
+          if (!entry || !entry.value.paper_id) continue
+          if (opts.onPinAnnounce) {
+            await opts.onPinAnnounce(entry.value.paper_id, peerKey)
+          }
+          console.log(`[blob-transfer] Pin announced by ${peerKey.slice(0, 12)}...: ${entry.value.paper_id}`)
+        } catch (err) {
+          console.error(`[blob-transfer] Pin announcement handling failed: ${err.message}`)
+        }
+      }
+      return
+    }
+
     if (msg.type !== 'request_blob') return
 
     const { hash } = msg

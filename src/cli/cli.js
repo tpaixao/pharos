@@ -289,7 +289,7 @@ program
     const store = pharos.getStore()
 
     const { startArchiveSwarm, startBlobSwarm, stopAll } = require('../replicate/swarm')
-    const { serveBlobs } = require('../replicate/replicate')
+    const { serveBlobs, sendMessage } = require('../replicate/replicate')
 
     // Archive swarm: metadata replication (Hyperbee/Hyperdrive via corestore.replicate)
     const archiveSwarm = await startArchiveSwarm(store, {
@@ -298,9 +298,29 @@ program
       topics: opts.subscribe || []
     })
 
-    // Blob swarm: dedicated channel for blob request/serve (no corestore replication)
+    // Blob swarm: dedicated channel for blob request/serve + pin announcements
+    // (no corestore replication on this channel; length-prefixed JSON only)
+    const { getLocalPins, addReplica } = require('../replicate/health')
     const blobSwarm = await startBlobSwarm((conn, info) => {
-      serveBlobs(conn, store)
+      const peerKey = info.publicKey?.toString('hex') || 'unknown'
+      serveBlobs(conn, store, {
+        onPinAnnounce: async (paperId, pk) => {
+          try {
+            await addReplica(paperId, pk)
+          } catch (err) {
+            console.log(`[blob-transfer] Could not record replica (read-only index?): ${err.message}`)
+          }
+        }
+      })
+      // Announce our own pins to the newly connected peer
+      getLocalPins().then((pins) => {
+        if (pins.length) {
+          sendMessage(conn, { type: 'pin_announce', hashes: pins, peer_key: store.drive.key.toString('hex') })
+          console.log(`[blob-transfer] Announced ${pins.length} pin(s) to ${peerKey.slice(0, 12)}...`)
+        }
+      }).catch((err) => {
+        console.log(`[blob-transfer] Pin announce failed: ${err.message}`)
+      })
     }, {
       server: opts.server !== false,
       client: opts.client !== false
