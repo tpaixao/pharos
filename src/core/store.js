@@ -92,9 +92,12 @@ async function initReplicaStore(dataDir, publisherBeeKey, publisherDriveKey) {
   })
 
   // Read-only replica of publisher's Hyperdrive (if key provided)
+  // NOTE: Hyperdrive's constructor signature is (corestore, key, opts); a `key`
+  // field inside opts is silently ignored, which would create a fresh empty
+  // local drive. The publisher key must be passed as the second argument.
   let drive = null
   if (publisherDriveKey) {
-    drive = new Hyperdrive(corestore, { key: Buffer.from(publisherDriveKey, 'hex') })
+    drive = new Hyperdrive(corestore, Buffer.from(publisherDriveKey, 'hex'))
   } else {
     // Create a local drive for storing fetched blobs
     drive = new Hyperdrive(corestore, { name: 'pharos-drive-local' })
