@@ -18,7 +18,17 @@ program
 async function withStore(fn) {
   const opts = program.opts()
   const dataDir = path.resolve(opts.dataDir)
-  await pharos.initStore(dataDir)
+
+  // A replica node remembers its publisher keys after `fetch-remote`
+  // (dataDir/remote.json). If present, open the replicated store instead
+  // of a fresh local one, otherwise pin/health would see an empty index.
+  const remoteFile = path.join(dataDir, 'remote.json')
+  if (fs.existsSync(remoteFile)) {
+    const remote = JSON.parse(fs.readFileSync(remoteFile, 'utf8'))
+    await pharos.initReplicaStore(dataDir, remote.bee_key, remote.drive_key)
+  } else {
+    await pharos.initStore(dataDir)
+  }
   try {
     await fn()
   } finally {
@@ -435,6 +445,13 @@ program
   .action(async (paperId, opts) => {
     const dataDir = path.resolve(program.opts().dataDir)
     await pharos.initReplicaStore(dataDir, opts.beeKey, opts.driveKey)
+    // Remember publisher keys so later `pin`/`health`/`browse`/`search`
+    // commands open the replicated store, not a fresh empty local one.
+    fs.writeFileSync(path.join(dataDir, 'remote.json'), JSON.stringify({
+      bee_key: opts.beeKey,
+      drive_key: opts.driveKey || null,
+      saved_at: new Date().toISOString()
+    }, null, 2))
     try {
       const { getStore } = require('../core/store')
       const { startArchiveSwarm, startBlobSwarm, stopAll } = require('../replicate/swarm')
