@@ -1,5 +1,7 @@
 'use strict'
 
+const { verifyMetadata } = require('./signing')
+
 /**
  * Validate paper metadata before insertion into Hyperbee.
  * @param {object} meta - metadata object
@@ -79,6 +81,21 @@ function validateMetadata(meta) {
         const v = meta.identity[field]
         if (v !== undefined && v !== null && typeof v !== 'string') {
           errors.push(`identity.${field} must be a string or null`)
+        }
+      }
+
+      // Metadata signatures (src/core/signing.js): a record claiming an
+      // ORCID-verified identity (implicit-openid) must carry a cryptographically
+      // valid Ed25519 signature binding the claim to its signer key. Unsigned
+      // records are still legal, but their identity claim is downgraded.
+      if (meta.identity.orcid_auth_flow === 'implicit-openid') {
+        if (!meta.signature) {
+          errors.push('identity claim (implicit-openid) requires a metadata signature; hand-crafted records cannot claim verified identity')
+        } else {
+          const sig = verifyMetadata(meta)
+          if (!sig.valid) {
+            errors.push(`metadata signature invalid: ${sig.reason}`)
+          }
         }
       }
     }

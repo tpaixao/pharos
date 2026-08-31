@@ -3,6 +3,7 @@
 const { getStore } = require('../core/store')
 const { computeHash, blobKey, makePaperId, subjectFromPaperId } = require('../core/hash')
 const { validateMetadata } = require('../core/schema')
+const { signMetadata } = require('../core/signing')
 const { KEY_PREFIX } = require('../core/constants')
 
 /**
@@ -58,7 +59,7 @@ async function publish(pdfPath, opts) {
 
   // 6. Build metadata
   const now = new Date().toISOString()
-  const metadata = {
+  const meta = {
     paper_id: paperId,
     title: opts.title,
     authors: opts.authors || [],
@@ -82,32 +83,43 @@ async function publish(pdfPath, opts) {
     replicated_by: [drive.key.toString('hex')]
   }
 
+  // 6b. Sign the identity-bearing metadata with the drive keypair.
+  // Binds signed_by + identity + content_hash to the publisher's Ed25519 key,
+  // so a hand-crafted record can no longer forge identity claims.
+  try {
+    const signed = signMetadata(meta, drive.core.keyPair.secretKey)
+    meta.signature = signed.signature
+    meta.signer_pubkey = signed.signer_pubkey
+  } catch (err) {
+    throw new Error(`metadata signing failed: ${err.message}`)
+  }
+
   // 7. Validate metadata
-  const { valid, errors } = validateMetadata(metadata)
+  const { valid, errors } = validateMetadata(meta)
   if (!valid) {
     throw new Error(`Metadata validation failed: ${errors.join(', ')}`)
   }
 
   // 8. Write metadata.json to Hyperdrive
   const metaBlobKey = blobKey(paperId, version, 'metadata.json')
-  await drive.put(metaBlobKey, Buffer.from(JSON.stringify(metadata, null, 2)))
+  await drive.put(metaBlobKey, Buffer.from(JSON.stringify(meta, null, 2)))
 
   // 9. Insert into Hyperbee
-  await bee.put(`${KEY_PREFIX.PAPER}${paperId}`, metadata)
+  await bee.put(`${KEY_PREFIX.PAPER}${paperId}`, meta)
   await bee.put(`${KEY_PREFIX.HASH}${contentHash}`, {
     paper_id: paperId,
     blob_key: pdfBlobKey,
     type: 'pdf',
     size: pdfBuffer.length,
-    replicated_by: metadata.replicated_by
+    replicated_by: meta.replicated_by
   })
-  await bee.put(`${KEY_PREFIX.CATEGORY}${metadata.subject}:recent:${paperId}`, { paper_id: paperId })
+  await bee.put(`${KEY_PREFIX.CATEGORY}${meta.subject}:recent:${paperId}`, { paper_id: paperId })
   if (opts.doi) {
     await bee.put(`${KEY_PREFIX.DOI}${opts.doi}`, { paper_id: paperId })
   }
 
   // 10. Index in FTS5
-  await addToIndex(db, paperId, metadata, pdfBuffer)
+  await addToIndex(db, paperId, meta, pdfBuffer)
 
   return {
     paper_id: paperId,

@@ -420,6 +420,12 @@ The build order is designed to produce a working vertical slice (publish a PDF, 
 
 **Deliverable:** Replica claims that expire when peers go silent and are recorded by every receiving node, not only the publisher; health threshold reflects reality.
 
+### Weekend 6 (completed): Replica Health + Ed25519 Metadata Signing
+
+**Replica liveness** (as sketched above): replicas stored as `[{peer_key, last_seen}]`, 6h re-announcement timer, 24h TTL sweep, at-risk flip verified with two-node test.
+
+**Ed25519 metadata signing** (`src/core/signing.js`): paper metadata now carries `signature` + `signer_pubkey`, created at publish time from the publisher's drive keypair (`drive.core.keyPair.secretKey`). The signature covers a canonical, recursively key-sorted serialization of the identity-bearing fields (paper_id, title, authors, abstract, subject, doi, source, version, previous_version_hash, content_hash, blob_key, hyperdrive_key, signed_by, identity), prefixed with a domain-separation tag (`pharos/metadata-signing/v1`) so a metadata signature can never be replayed as a Hypercore block signature. Mutable bookkeeping fields (published_at, first_seen, replicated_by) are excluded so replica-claim updates never invalidate signatures. Hard gate in the schema: a record claiming `orcid_auth_flow: 'implicit-openid'` without a cryptographically valid signature is rejected — hand-crafted records can no longer claim ORCID-verified identity. Verification supports optional `expectedPubkeyHex` anchoring (e.g. against a known publisher key). `signer_pubkey` is the raw Ed25519 public key of the drive core, NOT `drive.key` (which is a namespace-derived discovery key — a common trap). 11 new tests (`test/test_signing.js`), total: 85 tests.
+
 ## Testing Strategy
 
 All tests use Node's built-in `node:test` runner (no Jest dependency).
