@@ -706,7 +706,7 @@ function renderHomepage() {
       chips.forEach(c => c.classList.remove('active'));
       chips.forEach(c => {
         const onclick = c.getAttribute('onclick') || '';
-        if (onclick.includes("'" + currentSubject + "'") || (currentSubject === '' && onclick.includes("''))) {
+        if (onclick.includes("'" + currentSubject + "'") || (currentSubject === '' && onclick.includes("'"))) {
           c.classList.add('active');
         }
       });
