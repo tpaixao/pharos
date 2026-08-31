@@ -389,7 +389,24 @@ program
   .action(async (paperId) => {
     await withStore(async () => {
       const { pinPaper } = require('../replicate/health')
-      const result = await pinPaper(paperId)
+      let result = await pinPaper(paperId)
+
+      // Replica node: the blob lives on the publisher's Hyperdrive. Open the
+      // archive swarm so corestore.replicate can fetch the block on demand,
+      // then retry until it arrives or we time out.
+      if (!result.pinned && result.error === 'blob not available') {
+        const { getStore } = require('../core/store')
+        const { startArchiveSwarm, stopAll } = require('../replicate/swarm')
+        console.log('Blob not local, fetching from publisher via archive swarm...')
+        await startArchiveSwarm(getStore(), { server: true, client: true })
+        const deadline = Date.now() + 30000
+        while (!result.pinned && Date.now() < deadline) {
+          await new Promise((r) => setTimeout(r, 2000))
+          result = await pinPaper(paperId)
+        }
+        await stopAll().catch(() => {})
+      }
+
       if (result.pinned) {
         console.log(`Pinned: ${result.paper_id}`)
         console.log(`  Hash: ${result.content_hash}`)
