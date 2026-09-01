@@ -322,42 +322,13 @@ program
     await pharos.initStore(dataDir)
     const store = pharos.getStore()
 
-    const { startArchiveSwarm, startBlobSwarm, stopAll } = require('../replicate/swarm')
-    const { serveBlobs, sendMessage } = require('../replicate/replicate')
+    const { stopAll } = require('../replicate/swarm')
+    const { startServing } = require('../replicate/session')
 
-    // Archive swarm: metadata replication (Hyperbee/Hyperdrive via corestore.replicate)
-    const archiveSwarm = await startArchiveSwarm(store, {
+    const { archiveSwarm, blobSwarm, topics } = await startServing(store, {
       server: opts.server !== false,
       client: opts.client !== false,
-      topics: opts.subscribe || []
-    })
-
-    // Blob swarm: dedicated channel for blob request/serve + pin announcements
-    // (no corestore replication on this channel; length-prefixed JSON only)
-    const { getLocalPins, addReplica } = require('../replicate/health')
-    const blobSwarm = await startBlobSwarm((conn, info) => {
-      const peerKey = info.publicKey?.toString('hex') || 'unknown'
-      serveBlobs(conn, store, {
-        onPinAnnounce: async (paperId, pk) => {
-          try {
-            await addReplica(paperId, pk)
-          } catch (err) {
-            console.log(`[blob-transfer] Could not record replica (read-only index?): ${err.message}`)
-          }
-        }
-      })
-      // Announce our own pins to the newly connected peer
-      getLocalPins().then((pins) => {
-        if (pins.length) {
-          sendMessage(conn, { type: 'pin_announce', hashes: pins, peer_key: store.drive.key.toString('hex') })
-          console.log(`[blob-transfer] Announced ${pins.length} pin(s) to ${peerKey.slice(0, 12)}...`)
-        }
-      }).catch((err) => {
-        console.log(`[blob-transfer] Pin announce failed: ${err.message}`)
-      })
-    }, {
-      server: opts.server !== false,
-      client: opts.client !== false
+      subscribe: opts.subscribe || []
     })
 
     console.log(`\nPharos daemon running.`)
@@ -365,7 +336,7 @@ program
     console.log(`  Bee key:         ${store.bee.core.key.toString('hex')}`)
     console.log(`  Archive peers:   ${archiveSwarm.peers}`)
     console.log(`  Blob transfers: ${blobSwarm.connections.length}`)
-    console.log(`  Topics:          ${['archive', 'blob-transfer', ...opts.subscribe || []].join(', ')}`)
+    console.log(`  Topics:          ${topics.join(', ')}`)
     console.log(`\n  Press Ctrl+C to stop.`)
 
     let shuttingDown = false
@@ -389,23 +360,17 @@ program
   .action(async (paperId) => {
     await withStore(async () => {
       const { pinPaper } = require('../replicate/health')
-      let result = await pinPaper(paperId)
+      const { pinWithSwarmFallback } = require('../replicate/session')
 
-      // Replica node: the blob lives on the publisher's Hyperdrive. Open the
-      // archive swarm so corestore.replicate can fetch the block on demand,
-      // then retry until it arrives or we time out.
-      if (!result.pinned && result.error === 'blob not available') {
-        const { getStore } = require('../core/store')
-        const { startArchiveSwarm, stopAll } = require('../replicate/swarm')
+      // Check once up front just to print the "fetching..." notice before
+      // the (possibly 30s) swarm-fallback wait -- pinWithSwarmFallback()
+      // does the same initial check internally, so this is a cheap re-read.
+      const initial = await pinPaper(paperId)
+      if (!initial.pinned && initial.error === 'blob not available') {
         console.log('Blob not local, fetching from publisher via archive swarm...')
-        await startArchiveSwarm(getStore(), { server: true, client: true })
-        const deadline = Date.now() + 30000
-        while (!result.pinned && Date.now() < deadline) {
-          await new Promise((r) => setTimeout(r, 2000))
-          result = await pinPaper(paperId)
-        }
-        await stopAll().catch(() => {})
       }
+
+      const result = initial.pinned ? initial : await pinWithSwarmFallback(paperId)
 
       if (result.pinned) {
         console.log(`Pinned: ${result.paper_id}`)
@@ -471,22 +436,21 @@ program
     }, null, 2))
     try {
       const { getStore } = require('../core/store')
-      const { startArchiveSwarm, startBlobSwarm, stopAll } = require('../replicate/swarm')
+      const { startBlobSwarm, stopAll } = require('../replicate/swarm')
       const { requestBlob } = require('../replicate/replicate')
+      const { waitForArchiveSync } = require('../replicate/session')
 
       const store = getStore()
 
-      // Archive swarm: replicate metadata (Hyperbee/Hyperdrive)
-      const archiveSwarm = await startArchiveSwarm(store, { server: false, client: true })
-
-      // Blob swarm: connect to peer for blob transfer
+      // Blob swarm: connect to peer for blob transfer. Started before the
+      // archive-sync wait below so it has the same window to connect.
       let blobConn = null
-      const blobSwarm = await startBlobSwarm((conn, info) => {
+      await startBlobSwarm((conn, info) => {
         blobConn = conn
       }, { server: false, client: true })
 
       console.log('Waiting for peer connection...')
-      await new Promise(resolve => setTimeout(resolve, 15000))
+      const archiveSwarm = await waitForArchiveSync(store)
 
       if (archiveSwarm.peers === 0) {
         console.log('No peers found. Is the publisher running `pharos serve`?')
@@ -495,10 +459,6 @@ program
       }
 
       console.log(`Connected to ${archiveSwarm.peers} archive peer(s).`)
-
-      // Wait for bee replication to sync
-      console.log('Syncing metadata index...')
-      await new Promise(resolve => setTimeout(resolve, 5000))
 
       const meta = await pharos.getPaper(paperId)
       if (!meta) {

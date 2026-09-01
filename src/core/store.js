@@ -211,11 +211,15 @@ function dirSize(dirPath) {
  * Removes the PDF blob from Hyperdrive and deletes Hyperbee entries.
  *
  * @param {number} maxBytes - target maximum total bytes; evict until under threshold
- * @returns {Promise<object>} { evicted: number, freed_bytes: number }
+ * @param {object} [opts] - { dryRun: false } - when true, nothing is deleted;
+ *   candidates are only listed (with sizes) for a preview.
+ * @returns {Promise<object>} apply: { evicted, freed_bytes }
+ *   dry run: { dry_run: true, current_total_bytes, would_evict, would_free_bytes, papers }
  */
-async function evictUnpinned(maxBytes) {
+async function evictUnpinned(maxBytes, opts = {}) {
   if (!storeInstance) throw new Error('Store not initialized')
   const { bee, drive, db } = storeInstance
+  const dryRun = Boolean(opts.dryRun)
 
   const allPapers = []
   for await (const { key, value } of bee.createReadStream({
@@ -227,15 +231,32 @@ async function evictUnpinned(maxBytes) {
   }
   allPapers.sort((a, b) => (a.value.published_at || '').localeCompare(b.value.published_at || ''))
 
-  let usage = await getDiskUsage()
+  const startUsage = await getDiskUsage()
+  let usage = startUsage
   let evicted = 0
   let freedBytes = 0
+  const candidates = []
 
   for (const { key, value, replicas } of allPapers) {
     if (usage.total_bytes <= maxBytes) break
     if (replicas >= 2) continue
 
     const paperSize = await getBlobSize(drive, value.blob_key)
+
+    if (dryRun) {
+      candidates.push({
+        paper_id: value.paper_id,
+        title: value.title,
+        published_at: value.published_at,
+        size_bytes: paperSize
+      })
+      evicted++
+      freedBytes += paperSize
+      // Nothing was actually deleted, so estimate the running total by
+      // subtracting the projected size instead of re-statting disk usage.
+      usage = { total_bytes: usage.total_bytes - paperSize }
+      continue
+    }
 
     try { await drive.del(value.blob_key) } catch (_) {}
     const metaKey = value.blob_key.replace('fulltext.pdf', 'metadata.json')
@@ -257,6 +278,15 @@ async function evictUnpinned(maxBytes) {
     usage = await getDiskUsage()
   }
 
+  if (dryRun) {
+    return {
+      dry_run: true,
+      current_total_bytes: startUsage.total_bytes,
+      would_evict: evicted,
+      would_free_bytes: freedBytes,
+      papers: candidates
+    }
+  }
   return { evicted, freed_bytes: freedBytes }
 }
 

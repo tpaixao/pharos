@@ -41,7 +41,7 @@ const {
   verifyAccessToken, saveOrcidConfig
 } = require('../publish/orcid')
 const { search, rebuildIndex } = require('../search/index')
-const { healthReport, pinPaper, getLocalPins, addReplica } = require('../replicate/health')
+const { healthReport } = require('../replicate/health')
 const { KEY_PREFIX, VALID_SUBJECTS } = require('../core/constants')
 
 let serverInstance = null
@@ -115,30 +115,8 @@ async function startServer(opts = {}) {
  * and the blob-transfer topic to serve blobs and record pin announcements.
  */
 async function startEmbeddedSwarms() {
-  const { startArchiveSwarm, startBlobSwarm } = require('../replicate/swarm')
-  const { serveBlobs, sendMessage } = require('../replicate/replicate')
-  const store = getStore()
-
-  const archiveSwarm = await startArchiveSwarm(store, {
-    server: true,
-    client: true,
-    topics: serveTopics
-  })
-
-  const blobSwarm = await startBlobSwarm((conn, info) => {
-    serveBlobs(conn, store, {
-      onPinAnnounce: async (paperId, pk) => {
-        try { await addReplica(paperId, pk) } catch (_) {}
-      }
-    })
-    getLocalPins().then((pins) => {
-      if (pins.length) {
-        sendMessage(conn, { type: 'pin_announce', hashes: pins, peer_key: store.drive.key.toString('hex') })
-      }
-    }).catch(() => {})
-  }, { server: true, client: true })
-
-  embeddedSwarms = { archiveSwarm, blobSwarm, topics: ['archive', 'blob-transfer', ...serveTopics] }
+  const { startServing } = require('../replicate/session')
+  embeddedSwarms = await startServing(getStore(), { subscribe: serveTopics })
 }
 
 /** Stop embedded swarms, if running. Idempotent. */
@@ -407,20 +385,13 @@ async function handleFetchRemote(req, res) {
   }, null, 2))
 
   // Briefly join the archive swarm to let the Hyperbee/Hyperdrive replicate.
-  const { startArchiveSwarm, stopAll } = require('../replicate/swarm')
+  const { stopAll } = require('../replicate/swarm')
+  const { waitForArchiveSync } = require('../replicate/session')
   const store = getStore()
   let peers = 0
   try {
-    const archiveSwarm = await startArchiveSwarm(store, { server: false, client: true })
-    const deadline = Date.now() + 15000
-    while (archiveSwarm.peers === 0 && Date.now() < deadline) {
-      await new Promise((r) => setTimeout(r, 500))
-    }
+    const archiveSwarm = await waitForArchiveSync(store)
     peers = archiveSwarm.peers
-    if (peers > 0) {
-      // Give the Hyperbee a moment to sync after the connection opens.
-      await new Promise((r) => setTimeout(r, 3000))
-    }
   } finally {
     await stopAll().catch(() => {})
   }
@@ -448,26 +419,11 @@ async function handlePin(req, res) {
   }
   const paperId = String(body.paper_id)
 
-  let result = await pinPaper(paperId)
-
-  // Replica node: the blob lives on the publisher's Hyperdrive. Join the
-  // archive swarm so corestore.replicate can fetch the block on demand,
-  // then retry until it arrives or we time out. If we're already serving
-  // (embedded swarms active), reuse that connection instead of starting a
-  // second archive swarm, which would orphan the first.
-  if (!result.pinned && result.error === 'blob not available') {
-    const startedTransient = !embeddedSwarms
-    const { startArchiveSwarm, stopAll } = require('../replicate/swarm')
-    if (startedTransient) {
-      await startArchiveSwarm(getStore(), { server: true, client: true })
-    }
-    const deadline = Date.now() + 30000
-    while (!result.pinned && Date.now() < deadline) {
-      await new Promise((r) => setTimeout(r, 2000))
-      result = await pinPaper(paperId)
-    }
-    if (startedTransient) await stopAll().catch(() => {})
-  }
+  // Reuse the embedded archive swarm if one is already running instead of
+  // starting a second (swarm.js keeps a single module-level instance, so
+  // starting another would silently orphan the first without stopping it).
+  const { pinWithSwarmFallback } = require('../replicate/session')
+  const result = await pinWithSwarmFallback(paperId, { reuseSwarm: Boolean(embeddedSwarms) })
 
   if (result.pinned) {
     return sendJSON(res, result)
@@ -487,59 +443,8 @@ async function handleEvict(req, res) {
   }
   const maxBytes = maxMb * 1024 * 1024
 
-  if (body.dry_run) {
-    return sendJSON(res, await previewEviction(maxBytes))
-  }
-
-  const result = await evictUnpinned(maxBytes)
+  const result = await evictUnpinned(maxBytes, { dryRun: Boolean(body.dry_run) })
   return sendJSON(res, result)
-}
-
-/** Preview what evictUnpinned(maxBytes) would remove, without deleting anything. */
-async function previewEviction(maxBytes) {
-  const store = getStore()
-  const { bee, drive } = store
-
-  const allPapers = []
-  for await (const { key, value } of bee.createReadStream({ gt: KEY_PREFIX.PAPER, lt: KEY_PREFIX.PAPER + '\xff' })) {
-    const replicas = value.replicated_by?.length || 0
-    allPapers.push({ value, replicas })
-  }
-  allPapers.sort((a, b) => (a.value.published_at || '').localeCompare(b.value.published_at || ''))
-
-  const usage = await getDiskUsage()
-  let projected = usage.total_bytes
-  const candidates = []
-
-  for (const { value, replicas } of allPapers) {
-    if (projected <= maxBytes) break
-    if (replicas >= 2) continue // pinned papers (>=2 replicas) are exempt
-
-    const size = await getBlobSizePreview(drive, value.blob_key)
-    candidates.push({
-      paper_id: value.paper_id,
-      title: value.title,
-      published_at: value.published_at,
-      size_bytes: size
-    })
-    projected -= size
-  }
-
-  return {
-    dry_run: true,
-    current_total_bytes: usage.total_bytes,
-    would_evict: candidates.length,
-    would_free_bytes: candidates.reduce((sum, c) => sum + c.size_bytes, 0),
-    papers: candidates
-  }
-}
-
-async function getBlobSizePreview(drive, blobKey) {
-  try {
-    const entry = await drive.entry(blobKey)
-    if (entry && entry.value && entry.value.blob) return entry.value.blob.byteLength
-  } catch (_) {}
-  return 0
 }
 
 /** Phase 3: GET /api/download/:paperId */
