@@ -1482,9 +1482,9 @@ function renderHomepage() {
           if (o.orcid_name === 'Unknown') {
             html += '<p style="color:var(--muted);font-size:0.8em;margin-top:8px">ORCID did not return a display name (usually means your ORCID record\\'s "Published name" visibility is set to Only Me). Set it to Trusted Parties or Everyone in your ORCID account settings, then reconnect below.</p>';
           }
-          html += '<div style="margin-top:8px"><a class="btn-sm" href="/api/orcid/authorize">Reconnect ORCID</a></div>';
+          html += '<div style="margin-top:8px"><a class="btn-sm" href="/api/orcid/authorize" target="_blank" rel="noopener">Reconnect ORCID</a></div>';
         } else {
-          html += '<a class="btn-sm primary" href="/api/orcid/authorize">Connect ORCID</a>';
+          html += '<a class="btn-sm primary" href="/api/orcid/authorize" target="_blank" rel="noopener">Connect ORCID</a>';
         }
         html +=
           '<div style="margin-top:12px">' +
@@ -1515,7 +1515,13 @@ function renderHomepage() {
         if (data.error) throw new Error(data.error);
         msg.className = 'form-msg ok';
         msg.textContent = 'Connected as ' + data.orcid_name + ' (' + data.orcid_id + ')';
-        loadOrcidStatus();
+        // loadOrcidStatus() re-renders the whole #orcid-status container,
+        // which is this message's own parent -- calling it immediately
+        // destroys the confirmation before it's visible (especially when
+        // reconnecting to the same identity, where the refreshed badge
+        // looks identical to the old one and the update is invisible).
+        // Give the user a moment to actually see it first.
+        setTimeout(loadOrcidStatus, 2000);
       } catch (err) {
         msg.className = 'form-msg err';
         msg.textContent = 'Error: ' + err.message;
