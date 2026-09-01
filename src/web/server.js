@@ -1476,17 +1476,24 @@ function renderHomepage() {
       try {
         const resp = await fetch('/api/orcid/status');
         const o = await resp.json();
+        let html = '';
         if (o.connected) {
-          el.innerHTML = '<span class="badge green">Connected as ' + escapeHtml(o.orcid_name) + ' (' + escapeHtml(o.orcid_id) + ')</span>';
+          html += '<span class="badge green">Connected as ' + escapeHtml(o.orcid_name) + ' (' + escapeHtml(o.orcid_id) + ')</span>';
+          if (o.orcid_name === 'Unknown') {
+            html += '<p style="color:var(--muted);font-size:0.8em;margin-top:8px">ORCID did not return a display name (usually means your ORCID record\\'s "Published name" visibility is set to Only Me). Set it to Trusted Parties or Everyone in your ORCID account settings, then reconnect below.</p>';
+          }
+          html += '<div style="margin-top:8px"><a class="btn-sm" href="/api/orcid/authorize">Reconnect ORCID</a></div>';
         } else {
-          el.innerHTML = '<a class="btn-sm primary" href="/api/orcid/authorize">Connect ORCID</a>' +
-            '<div style="margin-top:12px">' +
-            '<label for="orcid-token-input" style="display:block;font-size:0.85em;color:var(--muted);margin-bottom:4px">Paste access token from the ORCID callback page</label>' +
-            '<input type="text" id="orcid-token-input" placeholder="access token">' +
-            '<button class="btn-sm" style="margin-top:8px" onclick="submitOrcidToken()">Submit Token</button>' +
-            '<div id="orcid-token-msg" class="form-msg"></div>' +
-            '</div>';
+          html += '<a class="btn-sm primary" href="/api/orcid/authorize">Connect ORCID</a>';
         }
+        html +=
+          '<div style="margin-top:12px">' +
+          '<label for="orcid-token-input" style="display:block;font-size:0.85em;color:var(--muted);margin-bottom:4px">Paste access token from the ORCID callback page</label>' +
+          '<input type="text" id="orcid-token-input" placeholder="access token">' +
+          '<button class="btn-sm" style="margin-top:8px" onclick="submitOrcidToken()">Submit Token</button>' +
+          '<div id="orcid-token-msg" class="form-msg"></div>' +
+          '</div>';
+        el.innerHTML = html;
       } catch (e) {
         el.innerHTML = '<span style="color:var(--red)">Failed to load</span>';
       }
