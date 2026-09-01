@@ -114,3 +114,122 @@ are shared with the CLI via `src/replicate/session.js` rather than
 reimplemented. The web server can itself run as either role (publisher or
 replica, same D2 auto-detection) and optionally embed its own archive+blob
 swarm participation (`--no-serve` to disable).
+
+## Known limitation: no cross-publisher discovery
+
+Joining a category topic (`--subscribe q-bio.GN`) does **not** let you
+discover papers from publishers whose keys you don't already know. This was
+checked directly against the code, not assumed:
+
+- Hyperswarm topics (`categoryTopic()`, `swarm.js:41`) are a DHT rendezvous
+  point only — joining one gets you raw `connection` events with other peers
+  on that topic, nothing more.
+- The connection handler calls `corestore.replicate(conn)` unconditionally.
+  That call only syncs a core that **both sides already reference by its
+  exact public key** — it does not enumerate or announce "here are all the
+  cores I have" to a stranger. There is no discovery step in Corestore's
+  replication protocol itself.
+- `initReplicaStore(dataDir, beeKey, driveKey)` (`store.js:77`) is the only
+  place a node's corestore learns a specific publisher's keys, and those
+  keys must be passed in explicitly — there's nothing that fills them in
+  automatically.
+- A `src/replicate/protocol.js` module exists with a `pin_announce`-shaped
+  message format that looks like it could be a discovery mechanism, but it
+  is **dead code** — not `require()`'d anywhere. The pin-announce protocol
+  that actually runs (`replicate.js`) only broadcasts content hashes you
+  already pin, to peers you're already connected to; it carries no publisher
+  keys and no "who else exists" information.
+
+Net effect: two different publishers joining the exact same category topic
+today will connect to each other over the DHT and do nothing useful with the
+connection, because neither one's corestore references the other's keys.
+The only way to learn a publisher's keys right now is out-of-band — they run
+`pharos keys` (or you read them off the web UI's Node panel) and hand you
+the `bee_key`/`drive_key` directly, or share a `fetch-remote` link with
+those as query params.
+
+## Sketch: a gossip extension for publisher discovery
+
+A minimal, buildable design for closing that gap, following the same
+patterns already used elsewhere in `src/replicate/`.
+
+### Goal
+
+Join `pharos-category-qbiogn` and, without knowing any keys in advance, end
+up with a list of `{bee_key, drive_key, subjects}` for every publisher
+(and gossiping replica) currently reachable on that topic — feeding
+straight into the existing `fetch-remote` flow to actually sync one.
+
+### Wire protocol
+
+A third side-channel, same shape as `replicate.js`'s blob-transfer protocol
+(length-prefixed JSON) or `protocol.js`'s magic-byte-prefixed variant so it
+can share a connection with the archive swarm's category topic without
+colliding with Hypercore replication noise:
+
+```
+Message types:
+  { type: "publisher_announce",
+    bee_key: "<hex>", drive_key: "<hex>",
+    subjects: ["q-bio.GN"], announced_at: "<ISO8601>" }
+  { type: "publisher_request", subject: "q-bio.GN" }   // optional pull mode
+```
+
+### Propagation (the "gossip" part)
+
+Direct announce alone only tells you about peers you're *directly*
+connected to — with a small swarm that's most of the value already, but the
+epidemic/gossip property comes from **re-announcing what you've learned**,
+not just what you own:
+
+1. On connecting to a peer on a category topic, send a `publisher_announce`
+   for yourself (if you're a publisher for that subject) **and** for every
+   other publisher you've already learned about for that subject (if you're
+   a replica or a relay).
+2. On receiving a `publisher_announce`, upsert it into a local "known
+   publishers" table (see below) and, the next time you connect to a *new*
+   peer on that topic, forward it along. This is the same shape as the
+   existing pin-announce fan-out, just one hop further — publishers you've
+   never talked to propagate transitively through peers who have.
+3. **Loop/flood prevention**: track `(bee_key, announced_at)` already seen
+   and skip re-forwarding duplicates; cap how many announcements you forward
+   per new connection (e.g. most-recently-seen N); apply a TTL so a stale
+   announcement (publisher long offline) eventually stops propagating.
+
+### Local storage
+
+A small Hyperbee table (or even a flat JSON file, given the low write
+volume) keyed `known_publisher:<bee_key>` → `{drive_key, subjects,
+last_seen}`. Not part of the *replicated* Hyperbee — this is local-only
+discovery-cache state, same category as `remote.json` today.
+
+### Wiring it in
+
+- New module `src/replicate/discovery.js`, parallel to `session.js`:
+  `announceSelf(conn, knownPublishers)`, `handleDiscoveryMessage(msg,
+  knownPublishers)`, `listKnownPublishers(subject)`.
+- Attach it to the *category*-topic connections specifically inside
+  `startArchiveSwarm`'s connection handler (`swarm.js`) — it should only run
+  for category topics, not the global archive topic, or every node on the
+  network would gossip about every subject.
+- New CLI command: `pharos discover <subject> [--timeout 10000]` — joins
+  the category topic, listens for `publisher_announce`s until the timeout,
+  prints the resulting list (ready to paste into `fetch-remote`).
+- New web endpoint: `GET /api/discover?subject=q-bio.GN` (same join-and-
+  collect-with-timeout shape as `waitForArchiveSync` in `session.js`) +
+  a "Discover publishers" button in the Node panel that lists results with
+  a one-click "Fetch Remote" action per row.
+
+### Trust considerations
+
+Gossip is *unauthenticated by construction* — nothing stops a peer from
+announcing a bogus `bee_key`, and forwarded announcements aren't re-signed
+by whoever relays them. This doesn't threaten paper-level integrity (a
+gossiped key still has to resolve to a real Hyperbee whose records still
+have to pass the existing Ed25519 metadata-signature check to be trusted —
+see Trust model above), but it is a spam/DoS surface on the *discovery* UX
+itself: a malicious peer could flood fake announcements to bury real ones.
+Worth treating discovered publishers as explicitly **unverified** in the UI
+until a `fetch-remote` against them actually succeeds and yields
+signature-valid records, and worth rate-limiting how many announcements a
+single connection is allowed to send before being ignored.
