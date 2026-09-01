@@ -542,11 +542,20 @@ program
   .command('web')
   .description('Start the Pharos web UI server')
   .option('--port <n>', 'port number', '8093')
+  .option('--no-serve', 'disable embedded replication (offline UI only)')
+  .option('--subscribe <subjects...>', 'subject categories to subscribe to (space-separated)', [])
   .action(async (opts) => {
     const dataDir = path.resolve(program.opts().dataDir)
-    await pharos.initStore(dataDir)
     const port = parseInt(opts.port)
-    const server = await pharos.webServer.startServer({ port, dataDir })
+    // Store init (including replica auto-detection via remote.json) happens
+    // inside startServer(); do not pre-initialize here or the D2 fix in
+    // src/web/server.js can't tell a fresh publisher store from a replica.
+    const server = await pharos.webServer.startServer({
+      port,
+      dataDir,
+      serve: opts.serve !== false,
+      subscribe: opts.subscribe || []
+    })
 
     const store = pharos.getStore()
     console.log(`\nPharos Web UI`)
@@ -555,6 +564,7 @@ program
     console.log(`  Drive key:    ${store.drive.key.toString('hex')}`)
     console.log(`  Bee key:      ${store.bee.core.key.toString('hex')}`)
     console.log(`  Data dir:     ${dataDir}`)
+    console.log(`  Replication:  ${opts.serve !== false ? 'embedded (serving + syncing)' : 'disabled (--no-serve)'}`)
 
     // Graceful shutdown
     let shuttingDown = false

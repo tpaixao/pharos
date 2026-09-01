@@ -263,8 +263,9 @@ async function evictUnpinned(maxBytes) {
 async function getBlobSize(drive, blobKey) {
   try {
     const entry = await drive.entry(blobKey)
-    if (entry && entry.blob) return entry.blob.byteLength
-    if (entry && entry.value) return entry.value.length
+    // Hyperdrive's entry() nests blob size at entry.value.blob.byteLength
+    // (entry.value is the file's metadata object, not the buffer itself).
+    if (entry && entry.value && entry.value.blob) return entry.value.blob.byteLength
   } catch (_) {}
   return 0
 }
