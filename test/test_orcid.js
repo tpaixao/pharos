@@ -72,6 +72,34 @@ test('orcid: verifyAccessToken returns verified claims on success', async () => 
   }
 })
 
+test('orcid: verifyAccessToken composes name from given_name/family_name when name claim is absent', async () => {
+  const origFetch = global.fetch
+  global.fetch = async () => ({
+    ok: true,
+    json: async () => ({ sub: '0000-0002-1694-233X', given_name: 'Ada', family_name: 'Lovelace' })
+  })
+  try {
+    const claims = await verifyAccessToken('tok')
+    assert.strictEqual(claims.name, 'Ada Lovelace')
+  } finally {
+    global.fetch = origFetch
+  }
+})
+
+test('orcid: verifyAccessToken returns null name when no name parts are present at all', async () => {
+  const origFetch = global.fetch
+  global.fetch = async () => ({
+    ok: true,
+    json: async () => ({ sub: '0000-0002-1694-233X' })
+  })
+  try {
+    const claims = await verifyAccessToken('tok')
+    assert.strictEqual(claims.name, null)
+  } finally {
+    global.fetch = origFetch
+  }
+})
+
 test('orcid: generateState returns 32-char hex string', () => {
   const state = generateState()
   assert.strictEqual(state.length, 32)

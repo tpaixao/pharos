@@ -118,9 +118,16 @@ async function verifyAccessToken(token, opts = {}) {
     throw new Error(`ORCID userinfo verification failed: ${res.status}`)
   }
   const claims = await res.json()
+  // Some ORCID accounts' userinfo response omits the combined `name` claim
+  // but still includes `given_name`/`family_name` separately (depends on
+  // the account's display-name preference). Fall back to composing one
+  // rather than silently reporting "Unknown" when parts are available.
+  const composedName = claims.name ||
+    [claims.given_name, claims.family_name].filter(Boolean).join(' ') ||
+    null
   return {
     orcid_id: claims.sub,
-    name: claims.name,
+    name: composedName,
     nonce: opts.expectedNonce || null,
     verified_at: new Date().toISOString()
   }
