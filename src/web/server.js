@@ -1736,7 +1736,14 @@ function renderPaperPage(paperId) {
   <div id="content"><span class="spinner"></span> Loading...</div>
 
   <script>
-    const paperId = window.location.pathname.replace('/paper/', '');
+    // window.location.pathname decodes most percent-encoded characters
+    // (e.g. %3A -> ':') but deliberately leaves %2F encoded to avoid
+    // changing path-segment boundaries. Paper IDs contain literal slashes
+    // (pharos:q-bio.GN/2026.08.28/001), so without this decode the %2F
+    // survives into a re-encodeURIComponent() call below and gets
+    // double-encoded (%2F -> %252F), corrupting every API lookup on this
+    // page and showing "Paper not found" for every paper.
+    const paperId = decodeURIComponent(window.location.pathname.replace('/paper/', ''));
 
     async function load() {
       const resp = await fetch('/api/paper/' + encodeURIComponent(paperId));
