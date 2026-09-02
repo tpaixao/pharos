@@ -1,7 +1,11 @@
 node_modules/
 data/
-*.logdata_test/
-data/
+store/
+index/
+search.db
+serve.log
+publish.log
+test.log
+test-paper.pdf
 .env
 .env.backup*
-test.log
