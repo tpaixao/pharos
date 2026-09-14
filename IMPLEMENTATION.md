@@ -46,7 +46,9 @@ projects/p2p-preprint-archive/
       swarm.js             # Hyperswarm topic management, connection handling
       replicate.js         # blob request/serve protocol over Hyperswarm
       health.js            # replication health: pin counts, at-risk papers
-      protocol.js          # custom binary protocol for blob transfer
+      framing.js           # shared length-prefixed JSON framing (blob + discovery channels)
+      discovery.js         # gossip engine: publisher announcements, dedup, relay, rate limits
+      session.js           # shared orchestration for serve/sync/pin/discover sequences
     
     search/
       index.js             # SQLite FTS5 index management (build, query, rebuild)
@@ -425,6 +427,14 @@ The build order is designed to produce a working vertical slice (publish a PDF, 
 **Replica liveness** (as sketched above): replicas stored as `[{peer_key, last_seen}]`, 6h re-announcement timer, 24h TTL sweep, at-risk flip verified with two-node test.
 
 **Ed25519 metadata signing** (`src/core/signing.js`): paper metadata now carries `signature` + `signer_pubkey`, created at publish time from the publisher's drive keypair (`drive.core.keyPair.secretKey`). The signature covers a canonical, recursively key-sorted serialization of the identity-bearing fields (paper_id, title, authors, abstract, subject, doi, source, version, previous_version_hash, content_hash, blob_key, hyperdrive_key, signed_by, identity), prefixed with a domain-separation tag (`pharos/metadata-signing/v1`) so a metadata signature can never be replayed as a Hypercore block signature. Mutable bookkeeping fields (published_at, first_seen, replicated_by) are excluded so replica-claim updates never invalidate signatures. Hard gate in the schema: a record claiming `orcid_auth_flow: 'implicit-openid'` without a cryptographically valid signature is rejected — hand-crafted records can no longer claim ORCID-verified identity. Verification supports optional `expectedPubkeyHex` anchoring (e.g. against a known publisher key). `signer_pubkey` is the raw Ed25519 public key of the drive core, NOT `drive.key` (which is a namespace-derived discovery key — a common trap). 11 new tests (`test/test_signing.js`), total: 85 tests.
+
+### Weekend 7 (completed, post-MVP): Gossip-based Publisher Discovery
+
+**Discovery swarm + gossip engine** (`GOSSIP_IMPL_PLAN.md`, now fully implemented): a third Hyperswarm channel closes the documented "no cross-publisher discovery" gap. Per-subject topics `pharos-discovery-<subject>-pharos-v1` carry length-prefixed JSON gossip (`announce` / `request`); connections there are never passed to `corestore.replicate()` (the old `protocol.js` magic-byte idea that tried to share a stream with Hypercore replication is deleted — it was dead code with framing flaws, and its approach was already documented as broken in `replicate.js`'s header).
+
+Key mechanics: announcements mean "keys I can serve" — because replica stores open the publisher's cores by key, publishers and replicas announce under one rule, with bee-only announcements for replicas lacking a publisher drive key (`initReplicaStore` now records `hasPublisherDrive`). Epidemic relay with dedup on `(bee_key, announced_at)` (relays never mutate the originator's timestamp), hop cap 3, per-connection rate limits (10 msgs/5s), 64-entry announce batches, 1000-row LRU SQLite cache (`known_publishers` in the local-only `search.db` — never a Hyperbee table, so it can never replicate), 7-day TTL vs 10-minute re-announce liveness. Engines take an `interests` set: senders can't know what a receiver cares about (Hyperswarm v4 gives no topic info on server-side connections), so receivers filter what they store and relay — information flows along the interest graph, not as a global flood. Framing extracted to `src/replicate/framing.js` with a new frame-size cap (fixes a pre-existing unbounded-buffer issue in the blob reader too).
+
+Surfaces: `pharos discover <subject>` (one-shot client-only join + pull), `pharos publishers` (cache list), `serve` gossips by default (`--no-discovery`, `pharos web --no-discovery`), `GET /api/discover`, `GET /api/publishers`, Node panel "Discovered Publishers" with one-click prefill of the fetch-remote form. Discovered entries are marked **unverified** everywhere until fetch-remote succeeds and records pass the Ed25519 signature gate. 24 new tests (`test_discovery.js` engine/framing suite + 3 web API tests), total: 135 tests. Verified end-to-end over the live DHT: empty node `discover` → gossiped keys → `fetch-remote` → hash-verified PDF.
 
 ## Testing Strategy
 

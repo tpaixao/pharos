@@ -1,12 +1,16 @@
 'use strict'
 
 const crypto = require('crypto')
-const { ARCHIVE_TOPIC, BLOB_TRANSFER_TOPIC } = require('../core/constants')
+const { ARCHIVE_TOPIC, BLOB_TRANSFER_TOPIC, PHAROS_VERSION, VALID_SUBJECTS } = require('../core/constants')
 
 let archiveSwarmInstance = null
 let blobSwarmInstance = null
 let connectedPeers = new Set()
 let blobConnections = []
+// Discovery swarms are NOT singletons: a serving node runs a long-lived one
+// while `pharos discover` / the web API start short-lived client-only ones
+// in the same process (GOSSIP_IMPL_PLAN.md M4). stopAll() drains the set.
+let discoverySwarms = new Set()
 
 /**
  * Derive a Hyperswarm topic buffer from a string.
@@ -40,6 +44,19 @@ function blobTransferTopic() {
  */
 function categoryTopic(subject) {
   return topicFromName(`pharos-category-${subject.replace(/\./g, '').toLowerCase()}`)
+}
+
+/**
+ * Get a per-subject DISCOVERY topic -- the gossip rendezvous where nodes
+ * exchange {bee_key, drive_key, subjects} hints about publishers
+ * (GOSSIP_IMPL_PLAN.md, decision D2). Deliberately separate from
+ * categoryTopic(): those connections carry corestore.replicate() traffic
+ * which JSON framing cannot safely share a stream with.
+ * @param {string} subject - e.g. 'q-bio.GN'
+ * @returns {Buffer}
+ */
+function discoveryTopic(subject) {
+  return topicFromName(`pharos-discovery-${subject.replace(/\./g, '').toLowerCase()}-${PHAROS_VERSION}`)
 }
 
 /**
@@ -154,11 +171,69 @@ async function startBlobSwarm(onConnection, opts = {}) {
 }
 
 /**
+ * Start the discovery swarm for publisher gossip (GOSSIP_IMPL_PLAN.md M4).
+ * Connections here are NEVER passed to corestore.replicate() -- they run
+ * the length-prefixed JSON gossip protocol from discovery.js on clean
+ * streams we own entirely, mirroring the blob-transfer design.
+ *
+ * Unlike the archive/blob swarms this is not a module-level singleton: a
+ * serving node keeps a long-lived discovery swarm while the discover
+ * command / web API may start transient client-only ones concurrently.
+ *
+ * @param {function} onConnection - callback(conn, info) for each new connection
+ * @param {object} opts - { subjects: ['q-bio.GN', ...], server = true, client = true }
+ * @returns {Promise<object>} { swarm, stop }
+ */
+async function startDiscoverySwarm(onConnection, opts = {}) {
+  const Hyperswarm = require('hyperswarm')
+  const { server = true, client = true, subjects = [] } = opts
+
+  const swarm = new Hyperswarm()
+
+  swarm.on('connection', (conn, info) => {
+    const peerKey = info.publicKey?.toString('hex') || 'unknown'
+    console.log(`[discovery-swarm] Peer connected: ${peerKey.slice(0, 12)}...`)
+    conn.on('error', (err) => {
+      console.log(`[discovery-swarm] Connection error: ${err.message}`)
+    })
+    conn.on('close', () => {
+      console.log(`[discovery-swarm] Peer disconnected: ${peerKey.slice(0, 12)}...`)
+    })
+    if (onConnection) onConnection(conn, info)
+  })
+
+  for (const subject of subjects) {
+    if (!VALID_SUBJECTS.includes(subject)) {
+      console.warn(`[discovery-swarm] Skipping invalid subject: ${subject}`)
+      continue
+    }
+    swarm.join(discoveryTopic(subject), { server, client })
+    console.log(`[discovery-swarm] Joined discovery topic: ${subject}`)
+  }
+
+  await swarm.flush()
+
+  const handle = {
+    swarm,
+    get connections() { return swarm.connections.size },
+    stop: async () => {
+      discoverySwarms.delete(handle)
+      await swarm.destroy()
+    }
+  }
+  discoverySwarms.add(handle)
+  return handle
+}
+
+/**
  * Stop all swarms.
  */
 async function stopAll() {
   if (archiveSwarmInstance) await archiveSwarmInstance.stop()
   if (blobSwarmInstance) await blobSwarmInstance.stop()
+  for (const handle of [...discoverySwarms]) {
+    try { await handle.stop() } catch (_) {}
+  }
 }
 
 /**
@@ -172,10 +247,12 @@ function peerCount() {
 module.exports = {
   startArchiveSwarm,
   startBlobSwarm,
+  startDiscoverySwarm,
   stopAll,
   archiveTopic,
   blobTransferTopic,
   categoryTopic,
+  discoveryTopic,
   topicFromName,
   peerCount
 }

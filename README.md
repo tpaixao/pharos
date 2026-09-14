@@ -78,13 +78,21 @@ node src/index.js versions pharos:q-bio.GN/2026.08.28/001
 ### P2P Replication
 
 ```bash
-# Start daemon: join Hyperswarm, serve blobs to peers
+# Start daemon: join Hyperswarm, serve blobs to peers, gossip your keys
 node src/index.js serve
+# ...or without the discovery gossip channel
+node src/index.js serve --no-discovery
 
 # Show this node's public keys for connecting peers
 node src/index.js keys
 
-# Fetch a paper from a remote peer via Hyperswarm
+# Discover publishers of a subject via gossip -- no key exchange needed
+node src/index.js discover q-bio.GN --timeout 10000
+
+# List publishers learned from gossip so far (local cache)
+node src/index.js publishers q-bio.GN
+
+# Fetch a paper from a remote peer via Hyperswarm (keys from `discover`)
 node src/index.js fetch-remote pharos:q-bio.GN/2026.08.28/001 \
   --bee-key <hex> --drive-key <hex>
 
@@ -94,6 +102,16 @@ node src/index.js pin pharos:q-bio.GN/2026.08.28/001
 # Show replication health report
 node src/index.js health
 ```
+
+A third Hyperswarm channel — the **discovery swarm** — carries publisher gossip:
+length-prefixed JSON announcements of `{bee_key, drive_key, subjects}` on
+per-subject topics (`pharos-discovery-<subject>-pharos-v1`). Nodes announce the
+keys they can serve (publishers announce their own; replicas automatically
+announce their publisher's), relay what they learn, and dedup on
+`(bee_key, announced_at)` with a hop cap, rate limits, and TTLs. Discovered
+keys are *unverified hints* until `fetch-remote` succeeds and the replicated
+records pass the Ed25519 metadata-signature gate. See `GOSSIP_IMPL_PLAN.md`
+for the full design.
 
 ### Web UI
 
@@ -111,6 +129,7 @@ Browse to `http://0.0.0.0:8093` to:
 - Download PDFs inline
 - View version history for papers
 - Upload new papers via web form (multipart upload with validation)
+- Discover publishers via gossip (Node panel) and fetch from them with one click
 
 ### Storage Management
 
@@ -148,7 +167,7 @@ node src/index.js rebuild-index
 node --test test/
 ```
 
-74 tests passing across 9 test files: BLAKE2b hashing, metadata validation, Hyperdrive/Hyperbee round-trips, SQLite FTS5 search, publish + dedup, versioning, PDF retrieval, ORCID OAuth mock, P2P replication (two-node in-process), web server (routing, validation, security headers, upload, disk-usage).
+135 tests passing across 12 test files: BLAKE2b hashing, metadata validation, Hyperdrive/Hyperbee round-trips, SQLite FTS5 search, publish + dedup, versioning, PDF retrieval, ORCID OAuth mock, P2P replication (two-node in-process), web server (routing, validation, security headers, upload, disk-usage), and gossip discovery (framing, validation, dedup/TTL, transitive relay, rate limits, interest scoping, persistence).
 
 ## API Endpoints
 
@@ -162,8 +181,14 @@ node --test test/
 | GET | `/api/versions/{paper_id}` | Version history for a paper |
 | GET | `/api/stats` | Archive statistics (paper count, categories) |
 | GET | `/api/disk-usage` | Disk usage breakdown (store, index, db, total) |
+| GET | `/api/status` | Node status (keys, paper count, role) |
+| GET | `/api/serve-status` | Embedded replication swarm status |
+| GET | `/api/discover?subject=` | One-shot gossip discovery of publishers for a subject (`timeout_ms` 1s–30s) |
+| GET | `/api/publishers` | Local discovered-publishers cache (optional `?subject=`) |
 | GET | `/pdf/{paper_id}` | Serve PDF inline (magic byte verified) |
 | POST | `/api/publish` | Upload a new paper (multipart, max 50MB, PDF magic bytes checked) |
+| POST | `/api/fetch-remote` | Open a replicated store against a publisher's keys |
+| POST | `/api/pin` | Pin a paper locally (swarm-assisted fallback) |
 
 All responses include security headers: `X-Content-Type-Options: nosniff`, `X-Frame-Options: SAMEORIGIN`, `Referrer-Policy: no-referrer`. Only GET and POST methods are allowed.
 
@@ -200,22 +225,25 @@ pharos/
 │   │   └── publish.js           # Full publish flow (dedup, versioning, FTS5, browse)
 │   ├── replicate/
 │   │   ├── swarm.js             # Hyperswarm topic management, connection handling
+│   │   ├── framing.js           # Shared length-prefixed JSON framing (with size cap)
 │   │   ├── replicate.js         # Blob request/serve protocol over Hyperswarm
-│   │   ├── health.js            # Replication health: pin counts, at-risk papers
-│   │   └── protocol.js          # Custom binary protocol for blob transfer
+│   │   ├── discovery.js         # Gossip engine: publisher announcements, dedup, relay
+│   │   ├── session.js           # Shared orchestration: serve/sync/pin/discover sequences
+│   │   └── health.js            # Replication health: pin counts, at-risk papers
 │   ├── search/index.js          # SQLite FTS5 search + index rebuild
 │   ├── web/server.js            # HTTP API + web UI server
 │   ├── index.js                 # CLI entry point
 │   └── lib.js                   # Library exports
-├── test/                        # 9 test files, 74 tests
+├── test/                        # 12 test files, 135 tests
 ├── SCOPING.md                   # Architecture and design decisions
 ├── IMPLEMENTATION.md           # Build plan and weekend-by-weekend progress
+├── GOSSIP_IMPL_PLAN.md          # Publisher-discovery gossip design (implemented)
 └── RESEARCH.md                  # Motivation and related work
 ```
 
 ## Status
 
-**MVP complete.** All 6 weekends delivered: storage layer, publish flow, search, P2P replication, ORCID identity, versioning, web UI, and hardening. 74 tests passing.
+**MVP complete.** All 6 weekends delivered: storage layer, publish flow, search, P2P replication, ORCID identity, versioning, web UI, and hardening. **Post-MVP: gossip-based publisher discovery implemented** (`GOSSIP_IMPL_PLAN.md`) — nodes now learn each other's keys over the discovery swarm with no out-of-band exchange. 135 tests passing.
 
 ### Weekend Progress
 
@@ -226,6 +254,7 @@ pharos/
 | 3 | ORCID identity integration + versioning | Done |
 | 4 | Web UI (browse, search, read PDF, upload, version history) | Done |
 | 5 | Polish and hardening (security headers, input validation, graceful shutdown, storage management) | Done |
+| 6 | Gossip-based publisher discovery (discovery swarm, gossip engine, `discover`/`publishers` CLI, web Node panel) | Done |
 
 ### Post-MVP Roadmap
 

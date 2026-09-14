@@ -5,6 +5,8 @@ const { publish, fetchPdf, getPaper, browseCategory, getVersions } = require('./
 const { orcidAuth, generateNonce, verifyAccessToken, getOrcidImplicitUrl } = require('./publish/orcid')
 const { search, rebuildIndex } = require('./search/index')
 const webServer = require('./web/server')
+const { discoverPublishers, startDiscovery } = require('./replicate/session')
+const { listKnownPublishers } = require('./replicate/discovery')
 const { computeHash, makePaperId, blobKey, subjectFromPaperId } = require('./core/hash')
 const { validateMetadata } = require('./core/schema')
 
@@ -30,6 +32,9 @@ module.exports = {
   subjectFromPaperId,
   validateMetadata,
   webServer,
+  discoverPublishers,
+  startDiscovery,
+  listKnownPublishers,
   getDiskUsage,
   evictUnpinned
 }

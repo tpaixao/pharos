@@ -316,6 +316,7 @@ program
   .description('Start daemon: join Hyperswarm and serve blobs to peers')
   .option('--no-client', 'do not connect to peers (server only)')
   .option('--no-server', 'do not serve to peers (client only)')
+  .option('--no-discovery', 'disable publisher-discovery gossip')
   .option('--subscribe <subjects...>', 'subject categories to subscribe to (space-separated)', [])
   .action(async (opts) => {
     const dataDir = path.resolve(program.opts().dataDir)
@@ -325,10 +326,11 @@ program
     const { stopAll } = require('../replicate/swarm')
     const { startServing } = require('../replicate/session')
 
-    const { archiveSwarm, blobSwarm, topics } = await startServing(store, {
+    const { archiveSwarm, blobSwarm, discovery, topics } = await startServing(store, {
       server: opts.server !== false,
       client: opts.client !== false,
-      subscribe: opts.subscribe || []
+      subscribe: opts.subscribe || [],
+      discovery: opts.discovery !== false
     })
 
     console.log(`\nPharos daemon running.`)
@@ -336,6 +338,7 @@ program
     console.log(`  Bee key:         ${store.bee.core.key.toString('hex')}`)
     console.log(`  Archive peers:   ${archiveSwarm.peers}`)
     console.log(`  Blob transfers: ${blobSwarm.connections.length}`)
+    console.log(`  Discovery gossip: ${discovery ? `on (${discovery.subjects.join(', ')})` : 'off'}`)
     console.log(`  Topics:          ${topics.join(', ')}`)
     console.log(`\n  Press Ctrl+C to stop.`)
 
@@ -344,6 +347,7 @@ program
       if (shuttingDown) return
       shuttingDown = true
       console.log(`\n${signal} received, shutting down...`)
+      if (discovery) { try { await discovery.stop() } catch (_) {} }
       try { await stopAll() } catch (_) {}
       try { await pharos.close() } catch (_) {}
       process.exit(0)
@@ -399,6 +403,68 @@ program
         report.papers.filter(p => p.status === 'at-risk').forEach(p => {
           console.log(`    ${p.paper_id} (${p.replicas} replicas)`)
         })
+      }
+    })
+  })
+
+// pharos discover <subject>
+program
+  .command('discover')
+  .description('Discover publishers of a subject via gossip on the discovery swarm')
+  .argument('<subject>', 'subject category (e.g. q-bio.GN)')
+  .option('--timeout <ms>', 'how long to listen for announcements (ms)', '10000')
+  .action(async (subject, opts) => {
+    const { VALID_SUBJECTS } = require('../core/constants')
+    if (!VALID_SUBJECTS.includes(subject)) {
+      console.error(`Invalid subject: ${subject}`)
+      console.error(`Valid subjects: ${VALID_SUBJECTS.join(', ')}`)
+      process.exit(1)
+    }
+    await withStore(async () => {
+      const { discoverPublishers } = require('../replicate/session')
+      const timeoutMs = Math.min(Math.max(parseInt(opts.timeout) || 10000, 1000), 60000)
+      console.log(`Discovering publishers of ${subject} (listening for ${timeoutMs}ms)...`)
+      const publishers = await discoverPublishers(subject, { timeoutMs })
+
+      if (publishers.length === 0) {
+        console.log(`No publishers discovered for ${subject}.`)
+        console.log('Are any peers serving that subject? Try `pharos serve` on the other node.')
+        return
+      }
+
+      console.log(`\nDiscovered ${publishers.length} publisher(s) for ${subject} (unverified until fetch-remote succeeds):\n`)
+      for (const p of publishers) {
+        console.log(`  ${p.bee_key}`)
+        console.log(`    drive_key:     ${p.drive_key || '(unknown)'}`)
+        console.log(`    subjects:      ${p.subjects.join(', ')}`)
+        console.log(`    role:          ${p.is_publisher ? 'publisher' : 'replica/relay'}`)
+        console.log(`    last seen:     ${p.last_seen}`)
+        console.log(`    relay hops:    ${p.hops}`)
+        console.log()
+      }
+      console.log('Fetch a paper from one of them with:')
+      console.log(`  node src/index.js fetch-remote <paper_id> --bee-key <bee_key> --drive-key <drive_key>`)
+      console.log('\n(Results are cached in the local known_publishers table; see `pharos publishers`.)')
+    })
+  })
+
+// pharos publishers [subject]
+program
+  .command('publishers')
+  .description('List publishers discovered via gossip (local cache)')
+  .argument('[subject]', 'optional subject filter (e.g. q-bio.GN)')
+  .action(async (subject) => {
+    await withStore(async () => {
+      const { listKnownPublishers } = require('../replicate/discovery')
+      const rows = listKnownPublishers(pharos.getStore(), subject || null)
+      if (rows.length === 0) {
+        console.log('No known publishers cached. Run `pharos discover <subject>` first.')
+        return
+      }
+      console.log(`Known publishers (${rows.length}, unverified until fetch-remote succeeds):\n`)
+      for (const p of rows) {
+        console.log(`  ${p.bee_key}`)
+        console.log(`    drive_key: ${p.drive_key || '(unknown)'}  subjects: ${p.subjects.join(', ')}  last seen: ${p.last_seen}`)
       }
     })
   })
@@ -503,6 +569,7 @@ program
   .description('Start the Pharos web UI server')
   .option('--port <n>', 'port number', '8093')
   .option('--no-serve', 'disable embedded replication (offline UI only)')
+  .option('--no-discovery', 'disable publisher-discovery gossip in embedded replication')
   .option('--subscribe <subjects...>', 'subject categories to subscribe to (space-separated)', [])
   .action(async (opts) => {
     const dataDir = path.resolve(program.opts().dataDir)
@@ -514,7 +581,8 @@ program
       port,
       dataDir,
       serve: opts.serve !== false,
-      subscribe: opts.subscribe || []
+      subscribe: opts.subscribe || [],
+      discovery: opts.discovery !== false
     })
 
     const store = pharos.getStore()

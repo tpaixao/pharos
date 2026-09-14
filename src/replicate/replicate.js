@@ -16,6 +16,7 @@ const { KEY_PREFIX } = require('../core/constants')
  * happen on a dedicated "blob-transfer" topic where we own the stream entirely.
  *
  * Wire format: 4-byte big-endian length prefix + JSON payload
+ * (framing shared with the discovery protocol via ./framing.js)
  *
  * Message types:
  *   Request:  { type: "request_blob", hash: "blake2b:..." }
@@ -23,53 +24,7 @@ const { KEY_PREFIX } = require('../core/constants')
  *   Error:    { type: "error", hash: "blake2b:...", message: "..." }
  */
 
-const HEADER_SIZE = 4
-
-/**
- * Send a length-prefixed JSON message over a stream.
- * @param {Duplex} stream
- * @param {object} msg
- */
-function sendMessage(stream, msg) {
-  const json = Buffer.from(JSON.stringify(msg))
-  const header = Buffer.alloc(HEADER_SIZE)
-  header.writeUInt32BE(json.length, 0)
-  stream.write(Buffer.concat([header, json]))
-}
-
-/**
- * Read messages from a stream. Calls onMessage for each parsed message.
- * Returns a cleanup function.
- * @param {Duplex} stream
- * @param {function} onMessage - async (msg) => void
- * @returns {function} cleanup - removes listener
- */
-function readMessages(stream, onMessage) {
-  let buffer = Buffer.alloc(0)
-
-  const onData = (chunk) => {
-    buffer = Buffer.concat([buffer, chunk])
-    while (buffer.length >= HEADER_SIZE) {
-      const msgLen = buffer.readUInt32BE(0)
-      if (buffer.length < HEADER_SIZE + msgLen) break
-
-      const json = buffer.slice(HEADER_SIZE, HEADER_SIZE + msgLen)
-      buffer = buffer.slice(HEADER_SIZE + msgLen)
-
-      let msg
-      try {
-        msg = JSON.parse(json.toString('utf-8'))
-      } catch (err) {
-        console.error('[blob-transfer] Failed to parse message:', err.message)
-        continue
-      }
-      onMessage(msg)
-    }
-  }
-
-  stream.on('data', onData)
-  return () => stream.off('data', onData)
-}
+const { sendMessage, readMessages } = require('./framing')
 
 /**
  * Handle incoming blob requests as a server.

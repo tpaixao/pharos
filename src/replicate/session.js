@@ -11,9 +11,11 @@
  * once here instead of duplicated (and drifting) in each surface.
  */
 
-const { startArchiveSwarm, startBlobSwarm, stopAll } = require('./swarm')
+const { startArchiveSwarm, startBlobSwarm, startDiscoverySwarm, stopAll } = require('./swarm')
 const { serveBlobs, sendMessage } = require('./replicate')
 const { getLocalPins, addReplica, pinPaper } = require('./health')
+const { createDiscoveryEngine } = require('./discovery')
+const { KEY_PREFIX, VALID_SUBJECTS } = require('../core/constants')
 
 /**
  * Start serving: archive swarm (metadata replication via corestore) +
@@ -45,7 +47,22 @@ async function startServing(store, opts = {}) {
     }).catch(() => {})
   }, { server, client })
 
-  return { archiveSwarm, blobSwarm, topics: ['archive', 'blob-transfer', ...subscribe] }
+  // Discovery gossip (GOSSIP_IMPL_PLAN.md M5). Opt out with discovery: false;
+  // a failed discovery swarm must never take down serving itself.
+  let discovery = null
+  if (opts.discovery !== false) {
+    try {
+      discovery = await startDiscovery(store, { subscribe, server, client })
+    } catch (err) {
+      console.error('[serve] Discovery gossip failed to start:', err.message)
+    }
+  }
+
+  const topics = ['archive', 'blob-transfer', ...subscribe]
+  if (discovery) {
+    for (const s of discovery.subjects) topics.push(`discovery:${s}`)
+  }
+  return { archiveSwarm, blobSwarm, discovery, topics }
 }
 
 /**
@@ -74,6 +91,103 @@ async function waitForArchiveSync(store, opts = {}) {
     await new Promise((r) => setTimeout(r, syncGraceMs))
   }
   return archiveSwarm
+}
+
+/**
+ * Subjects this node should be discoverable under: the subjects of papers
+ * it can actually serve (own papers for a publisher, the publisher's papers
+ * for a replica) unioned with explicitly subscribed interests. Discovery
+ * topics are joined for this set; the self-announce itself only ever claims
+ * the serving capabilities (discovery.js selfEntry).
+ */
+async function resolveDiscoverySubjects(store, subscribe = []) {
+  const subjects = new Set()
+  for (const s of subscribe) {
+    if (VALID_SUBJECTS.includes(s)) subjects.add(s)
+    else console.warn(`[discovery] Ignoring invalid subscribed subject: ${s}`)
+  }
+  try {
+    for await (const { value } of store.bee.createReadStream({
+      gt: KEY_PREFIX.PAPER,
+      lt: KEY_PREFIX.PAPER + '\uffff'
+    })) {
+      if (value?.subject && VALID_SUBJECTS.includes(value.subject)) subjects.add(value.subject)
+    }
+  } catch (_) {}
+  return [...subjects]
+}
+
+/**
+ * Start long-lived discovery gossip for a serving node: joins one
+ * discovery topic per subject, announces this node's servable keys, and
+ * relays what it learns (GOSSIP_IMPL_PLAN.md M5). Returns null when the
+ * node has nothing to gossip about (no papers, no subscriptions).
+ *
+ * @param {object} store
+ * @param {object} [opts] - { subscribe = [], server = true, client = true }
+ * @returns {Promise<object|null>} { engine, subjects, stop }
+ */
+async function startDiscovery(store, opts = {}) {
+  const subscribe = opts.subscribe || []
+  const server = opts.server !== false
+  const client = opts.client !== false
+
+  const subjects = await resolveDiscoverySubjects(store, subscribe)
+  if (subjects.length === 0) {
+    console.log('[discovery] No subjects to gossip about (no local papers, no subscriptions)')
+    return null
+  }
+
+  const engine = createDiscoveryEngine({ store, opts: { interests: subjects } })
+  const swarm = await startDiscoverySwarm(
+    (conn, info) => engine.handleConnection(conn, info),
+    { subjects, server, client }
+  )
+  engine.startReannounceLoop()
+
+  return {
+    engine,
+    subjects,
+    stop: async () => {
+      engine.stop()
+      await swarm.stop()
+    }
+  }
+}
+
+/**
+ * One-shot discovery: join one subject's discovery topic client-only,
+ * pull announcements for `timeoutMs`, and return the publishers learned
+ * (also persisted to the local known_publishers cache). Same lifetime
+ * conventions as waitForArchiveSync -- callers stop swarms via stopAll()
+ * or the returned handle.
+ *
+ * @param {string} subject - e.g. 'q-bio.GN'
+ * @param {object} [opts] - { timeoutMs = 10000, store }
+ * @returns {Promise<object[]>} discovered publisher entries
+ */
+async function discoverPublishers(subject, opts = {}) {
+  const timeoutMs = opts.timeoutMs ?? 10000
+  if (!VALID_SUBJECTS.includes(subject)) {
+    throw new Error(`Invalid subject: ${subject}`)
+  }
+  const store = opts.store || require('../core/store').getStore()
+
+  const engine = createDiscoveryEngine({
+    store,
+    opts: { pullOnly: true, requestSubjects: [subject], interests: [subject] }
+  })
+  const swarm = await startDiscoverySwarm(
+    (conn, info) => engine.handleConnection(conn, info),
+    { subjects: [subject], server: false, client: true }
+  )
+
+  await new Promise((r) => setTimeout(r, timeoutMs))
+
+  const publishers = engine.listKnown(subject)
+  engine.stop()
+  await swarm.stop()
+  return publishers
 }
 
 /**
@@ -112,4 +226,4 @@ async function pinWithSwarmFallback(paperId, opts = {}) {
   return result
 }
 
-module.exports = { startServing, waitForArchiveSync, pinWithSwarmFallback }
+module.exports = { startServing, waitForArchiveSync, pinWithSwarmFallback, startDiscovery, discoverPublishers }

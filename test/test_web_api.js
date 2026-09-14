@@ -451,3 +451,74 @@ test('web-api: POST /api/fetch-remote rejects invalid bee_key', async () => {
     await stopTestServer()
   }
 })
+
+// ---- Discovery gossip (GOSSIP_IMPL_PLAN.md M7) ----
+
+test('web-api: GET /api/discover rejects invalid subject', async () => {
+  await startTestServer()
+  try {
+    const res = await fetchUrl('/api/discover?subject=nonsense.X')
+    assert.strictEqual(res.status, 400)
+    const data = JSON.parse(res.body)
+    assert.ok(data.error.includes('Invalid subject'))
+  } finally {
+    await stopTestServer()
+  }
+})
+
+test('web-api: GET /api/discover clamps timeout and returns publisher list shape', { timeout: 30000 }, async () => {
+  // No peers on the discovery topic in CI -> empty list after the clamped wait
+  await startTestServer()
+  try {
+    const res = await fetchUrl('/api/discover?subject=q-bio.GN&timeout_ms=1') // clamped up to 1000ms
+    assert.strictEqual(res.status, 200)
+    const data = JSON.parse(res.body)
+    assert.strictEqual(data.subject, 'q-bio.GN')
+    assert.strictEqual(data.timeout_ms, 1000)
+    assert.ok(Array.isArray(data.publishers))
+    if (data.publishers.length > 0) {
+      const p = data.publishers[0]
+      assert.match(p.bee_key, /^[0-9a-f]{64}$/)
+      assert.strictEqual(p.verified, false, 'discovered entries are unverified by construction')
+    }
+  } finally {
+    await stopTestServer()
+  }
+})
+
+test('web-api: GET /api/publishers lists the local gossip cache with subject filter', async () => {
+  await startTestServer()
+  try {
+    // Empty cache on a fresh data dir
+    let res = await fetchUrl('/api/publishers')
+    assert.strictEqual(res.status, 200)
+    let data = JSON.parse(res.body)
+    assert.ok(Array.isArray(data.publishers))
+    assert.strictEqual(data.publishers.length, 0)
+
+    // Seed the cache directly (as gossip would have) and re-read
+    const store = pharos.getStore()
+    const nowIso = new Date().toISOString()
+    store.db.prepare(
+      `INSERT INTO known_publishers
+         (bee_key, drive_key, subjects, is_publisher, hops, announced_at, first_seen, last_seen)
+       VALUES (?, ?, ?, 1, 0, ?, ?, ?)`
+    ).run('aa'.repeat(32), 'bb'.repeat(32), JSON.stringify(['q-bio.GN']), nowIso, nowIso, nowIso)
+
+    res = await fetchUrl('/api/publishers')
+    data = JSON.parse(res.body)
+    assert.strictEqual(data.publishers.length, 1)
+    assert.strictEqual(data.publishers[0].bee_key, 'aa'.repeat(32))
+    assert.strictEqual(data.publishers[0].verified, false)
+
+    res = await fetchUrl('/api/publishers?subject=cs.LG')
+    data = JSON.parse(res.body)
+    assert.strictEqual(data.publishers.length, 0, 'subject filter applies')
+
+    res = await fetchUrl('/api/publishers?subject=q-bio.GN')
+    data = JSON.parse(res.body)
+    assert.strictEqual(data.publishers.length, 1)
+  } finally {
+    await stopTestServer()
+  }
+})

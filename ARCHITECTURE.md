@@ -39,12 +39,12 @@ A node remembers which role it is via `data/remote.json` (written by
 server's `startServer()` D2 fix check on startup to decide which kind to
 open.
 
-## Two separate Hyperswarms, deliberately not one
+## Separate Hyperswarms per wire protocol, deliberately not one
 
 This was a real design decision documented in `replicate.js`'s header
 comment: mixing Hypercore's binary replication stream with a custom JSON
-protocol on the same connection corrupts the JSON framing. So there are two
-independent swarms, joined by topic hash (`swarm.js`):
+protocol on the same connection corrupts the JSON framing. Each channel
+gets its own swarm, joined by topic hash (`swarm.js`):
 
 1. **Archive swarm** (`pharos-archive-pharos-v1` topic) — pure
    `corestore.replicate(conn)`. This is what actually syncs Hyperbee/
@@ -57,6 +57,8 @@ independent swarms, joined by topic hash (`swarm.js`):
    **on-demand blob fetch** (a replica that only has metadata pulling one
    specific PDF) and for **pin announcements** (see below) — things outside
    what plain Hypercore replication gives you for free.
+3. **Discovery swarm** (`pharos-discovery-<subject>-pharos-v1` topics) — the
+   publisher-gossip channel (see the last section of this document).
 
 ## Publish → replicate → pin lifecycle
 
@@ -115,121 +117,76 @@ reimplemented. The web server can itself run as either role (publisher or
 replica, same D2 auto-detection) and optionally embed its own archive+blob
 swarm participation (`--no-serve` to disable).
 
-## Known limitation: no cross-publisher discovery
+## Publisher discovery: the gossip channel (as built)
 
-Joining a category topic (`--subscribe q-bio.GN`) does **not** let you
-discover papers from publishers whose keys you don't already know. This was
-checked directly against the code, not assumed:
+The original "no cross-publisher discovery" limitation is closed. Two
+publishers joining the same category topic used to connect over the DHT and
+do nothing useful, because neither's corestore referenced the other's keys —
+Hyperswarm topics are rendezvous points only, and `corestore.replicate()`
+syncs nothing without an exact public key on both sides. Keys entered the
+system only out-of-band (CLI flags, web form, `data/remote.json`).
 
-- Hyperswarm topics (`categoryTopic()`, `swarm.js:41`) are a DHT rendezvous
-  point only — joining one gets you raw `connection` events with other peers
-  on that topic, nothing more.
-- The connection handler calls `corestore.replicate(conn)` unconditionally.
-  That call only syncs a core that **both sides already reference by its
-  exact public key** — it does not enumerate or announce "here are all the
-  cores I have" to a stranger. There is no discovery step in Corestore's
-  replication protocol itself.
-- `initReplicaStore(dataDir, beeKey, driveKey)` (`store.js:77`) is the only
-  place a node's corestore learns a specific publisher's keys, and those
-  keys must be passed in explicitly — there's nothing that fills them in
-  automatically.
-- A `src/replicate/protocol.js` module exists with a `pin_announce`-shaped
-  message format that looks like it could be a discovery mechanism, but it
-  is **dead code** — not `require()`'d anywhere. The pin-announce protocol
-  that actually runs (`replicate.js`) only broadcasts content hashes you
-  already pin, to peers you're already connected to; it carries no publisher
-  keys and no "who else exists" information.
+The gap is closed by a **third swarm** — the discovery swarm — carrying
+publisher gossip. Full design and rationale in `GOSSIP_IMPL_PLAN.md`; the
+shape as built:
 
-Net effect: two different publishers joining the exact same category topic
-today will connect to each other over the DHT and do nothing useful with the
-connection, because neither one's corestore references the other's keys.
-The only way to learn a publisher's keys right now is out-of-band — they run
-`pharos keys` (or you read them off the web UI's Node panel) and hand you
-the `bee_key`/`drive_key` directly, or share a `fetch-remote` link with
-those as query params.
+- **Topics**: `pharos-discovery-<subject>-pharos-v1`, one per subject the
+  node can serve (papers in its bee) or subscribes to. A node with nothing
+  to gossip about joins no discovery topic.
+- **Protocol**: same length-prefixed JSON framing as the blob channel
+  (extracted to `src/replicate/framing.js`, now with a frame-size cap);
+  messages are `announce` (batched `{bee_key, drive_key, subjects,
+  announced_at, is_publisher, hops}` entries) and `request` (stateless
+  pull, used by `pharos discover`). Connections here are never passed to
+  `corestore.replicate()` — that was the documented failure mode of the old
+  `protocol.js` magic-byte idea, which is why that module was dead code and
+  has been deleted.
+- **Announcement semantics**: an entry means "keys I can serve". Because
+  replica stores open the publisher's cores *by key*, this one rule covers
+  publishers (announce own cores) and replicas (announce their publisher's
+  cores, keeping discovery alive when the publisher is offline). A replica
+  without a publisher drive key announces bee-only — its fresh local drive
+  key is useless to strangers.
+- **Propagation**: on connect, push self + recently-seen entries; on
+  receiving entries new to us, upsert locally and forward to all other
+  discovery peers — epidemic relay. Stateless discoverers send `request`
+  and get a subject-filtered reply. Senders can't know what a receiver
+  cares about (server-side connections carry no topic info in Hyperswarm
+  v4), so receivers filter: engines created with interests upsert/relay
+  only entries intersecting them. Information flows along the interest
+  graph instead of flooding globally.
+- **Loop/flood control**: dedup on `(bee_key, announced_at)` — stable across
+  every path because relays never mutate the originator's timestamp — plus
+  a hop cap (3), per-connection rate limits, batch caps, a 1000-row LRU
+  table cap, and 7-day TTL refreshed by 10-minute re-announces.
+- **Local storage**: a `known_publishers` SQLite table in the existing
+  local-only `search.db` — deliberately not a Hyperbee table, so it can
+  never replicate; same category of state as `remote.json`.
+- **Surfaces**: `pharos discover <subject>` (one-shot listen + print),
+  `pharos publishers` (cache listing), `serve` gossips by default
+  (`--no-discovery` to opt out), web `GET /api/discover` /
+  `GET /api/publishers` and a Node panel "Discovered Publishers" section
+  whose "Use" button prefills the fetch-remote form.
 
-## Sketch: a gossip extension for publisher discovery
+### Trust posture
 
-A minimal, buildable design for closing that gap, following the same
-patterns already used elsewhere in `src/replicate/`.
+Gossip is *unauthenticated by construction* — nothing stops a peer
+announcing bogus keys, and relayed announcements aren't re-signed. This
+doesn't threaten paper-level integrity: a gossiped key still has to resolve
+to a real Hyperbee whose records still have to pass the Ed25519
+metadata-signature gate, and a bogus key simply makes `fetch-remote` fail.
+It is a spam/DoS surface on the discovery *UX*, bounded by the rate/batch/
+size caps above. Discovered entries are rendered as **unverified** in the
+CLI and web UI until a fetch-remote against them actually succeeds.
 
-### Goal
+### Two swarms become three
 
-Join `pharos-category-qbiogn` and, without knowing any keys in advance, end
-up with a list of `{bee_key, drive_key, subjects}` for every publisher
-(and gossiping replica) currently reachable on that topic — feeding
-straight into the existing `fetch-remote` flow to actually sync one.
+The architecture now runs three deliberately separate channels, each with
+one job and one wire protocol owner:
 
-### Wire protocol
-
-A third side-channel, same shape as `replicate.js`'s blob-transfer protocol
-(length-prefixed JSON) or `protocol.js`'s magic-byte-prefixed variant so it
-can share a connection with the archive swarm's category topic without
-colliding with Hypercore replication noise:
-
-```
-Message types:
-  { type: "publisher_announce",
-    bee_key: "<hex>", drive_key: "<hex>",
-    subjects: ["q-bio.GN"], announced_at: "<ISO8601>" }
-  { type: "publisher_request", subject: "q-bio.GN" }   // optional pull mode
-```
-
-### Propagation (the "gossip" part)
-
-Direct announce alone only tells you about peers you're *directly*
-connected to — with a small swarm that's most of the value already, but the
-epidemic/gossip property comes from **re-announcing what you've learned**,
-not just what you own:
-
-1. On connecting to a peer on a category topic, send a `publisher_announce`
-   for yourself (if you're a publisher for that subject) **and** for every
-   other publisher you've already learned about for that subject (if you're
-   a replica or a relay).
-2. On receiving a `publisher_announce`, upsert it into a local "known
-   publishers" table (see below) and, the next time you connect to a *new*
-   peer on that topic, forward it along. This is the same shape as the
-   existing pin-announce fan-out, just one hop further — publishers you've
-   never talked to propagate transitively through peers who have.
-3. **Loop/flood prevention**: track `(bee_key, announced_at)` already seen
-   and skip re-forwarding duplicates; cap how many announcements you forward
-   per new connection (e.g. most-recently-seen N); apply a TTL so a stale
-   announcement (publisher long offline) eventually stops propagating.
-
-### Local storage
-
-A small Hyperbee table (or even a flat JSON file, given the low write
-volume) keyed `known_publisher:<bee_key>` → `{drive_key, subjects,
-last_seen}`. Not part of the *replicated* Hyperbee — this is local-only
-discovery-cache state, same category as `remote.json` today.
-
-### Wiring it in
-
-- New module `src/replicate/discovery.js`, parallel to `session.js`:
-  `announceSelf(conn, knownPublishers)`, `handleDiscoveryMessage(msg,
-  knownPublishers)`, `listKnownPublishers(subject)`.
-- Attach it to the *category*-topic connections specifically inside
-  `startArchiveSwarm`'s connection handler (`swarm.js`) — it should only run
-  for category topics, not the global archive topic, or every node on the
-  network would gossip about every subject.
-- New CLI command: `pharos discover <subject> [--timeout 10000]` — joins
-  the category topic, listens for `publisher_announce`s until the timeout,
-  prints the resulting list (ready to paste into `fetch-remote`).
-- New web endpoint: `GET /api/discover?subject=q-bio.GN` (same join-and-
-  collect-with-timeout shape as `waitForArchiveSync` in `session.js`) +
-  a "Discover publishers" button in the Node panel that lists results with
-  a one-click "Fetch Remote" action per row.
-
-### Trust considerations
-
-Gossip is *unauthenticated by construction* — nothing stops a peer from
-announcing a bogus `bee_key`, and forwarded announcements aren't re-signed
-by whoever relays them. This doesn't threaten paper-level integrity (a
-gossiped key still has to resolve to a real Hyperbee whose records still
-have to pass the existing Ed25519 metadata-signature check to be trusted —
-see Trust model above), but it is a spam/DoS surface on the *discovery* UX
-itself: a malicious peer could flood fake announcements to bury real ones.
-Worth treating discovered publishers as explicitly **unverified** in the UI
-until a `fetch-remote` against them actually succeeds and yields
-signature-valid records, and worth rate-limiting how many announcements a
-single connection is allowed to send before being ignored.
+1. **Archive swarm** — Hypercore replication (`corestore.replicate()`),
+   metadata + blob blocks, global + per-category topics.
+2. **Blob-transfer swarm** — request/serve individual blobs by content
+   hash, pin announcements.
+3. **Discovery swarm** — publisher gossip; the only channel that carries
+   *who exists* information.

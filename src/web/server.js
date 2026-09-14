@@ -26,6 +26,8 @@
  *   GET  /api/orcid/authorize     - Redirect to ORCID implicit-OpenID authorize URL
  *   POST /api/orcid/callback      - Verify a pasted ORCID access token, cache identity
  *   GET  /api/serve-status        - Embedded replication swarm status
+ *   GET  /api/discover?subject=   - One-shot gossip discovery of publishers (GOSSIP_IMPL_PLAN.md)
+ *   GET  /api/publishers          - List the local discovered-publishers cache
  */
 
 const http = require('http')
@@ -53,6 +55,9 @@ let currentDataDir = null
 let embeddedSwarms = null
 let serveEnabled = false
 let serveTopics = []
+// Discovery gossip toggle for embedded swarms (GOSSIP_IMPL_PLAN.md M7).
+// Only meaningful when serveEnabled; `pharos web --no-discovery` sets it.
+let discoveryEnabled = true
 
 // In-memory ORCID CSRF state map: state -> expiry timestamp (ms)
 const ORCID_STATE_TTL_MS = 5 * 60 * 1000
@@ -91,6 +96,7 @@ async function startServer(opts = {}) {
   // command opts in explicitly by default via --no-serve semantics.
   serveEnabled = opts.serve === true
   serveTopics = opts.subscribe || []
+  discoveryEnabled = opts.discovery !== false
   if (serveEnabled) {
     try {
       await startEmbeddedSwarms()
@@ -116,12 +122,21 @@ async function startServer(opts = {}) {
  */
 async function startEmbeddedSwarms() {
   const { startServing } = require('../replicate/session')
-  embeddedSwarms = await startServing(getStore(), { subscribe: serveTopics })
+  embeddedSwarms = await startServing(getStore(), {
+    subscribe: serveTopics,
+    discovery: discoveryEnabled
+  })
 }
 
 /** Stop embedded swarms, if running. Idempotent. */
 async function stopEmbeddedSwarms() {
   if (!embeddedSwarms) return
+  // The discovery engine's timers (reannounce/prune) are not owned by
+  // swarm.js's singletons -- stop them explicitly or every fetch-remote
+  // restart would leak a ticking engine against dead connections.
+  if (embeddedSwarms.discovery) {
+    try { await embeddedSwarms.discovery.stop() } catch (_) {}
+  }
   const { stopAll } = require('../replicate/swarm')
   try { await stopAll() } catch (_) {}
   embeddedSwarms = null
@@ -250,6 +265,15 @@ async function handleRequest(req, res) {
     // ---- Embedded replication (Phase 5) ----
     if (method === 'GET' && pathname === '/api/serve-status') {
       return sendJSON(res, getServeStatus())
+    }
+
+    // ---- Discovery gossip (GOSSIP_IMPL_PLAN.md M7) ----
+    if (method === 'GET' && pathname === '/api/discover') {
+      return handleDiscover(res, url)
+    }
+
+    if (method === 'GET' && pathname === '/api/publishers') {
+      return handleListPublishers(res, url)
     }
 
     // ---- PDF serving ----
@@ -547,8 +571,47 @@ function getServeStatus() {
     serving: true,
     archive_peers: embeddedSwarms.archiveSwarm.peers,
     blob_connections: embeddedSwarms.blobSwarm.connections.length,
+    discovery_gossip: Boolean(embeddedSwarms.discovery),
     topics: embeddedSwarms.topics
   }
+}
+
+/**
+ * Discovery: GET /api/discover?subject=X&timeout_ms=N
+ *
+ * One-shot gossip query: joins the subject's discovery topic client-only,
+ * listens for announcements for timeout_ms (clamped 1s..30s), returns what
+ * was learned. Entries are UNVERIFIED until fetch-remote succeeds and the
+ * replicated records pass the metadata-signature gate (plan decision D6).
+ */
+async function handleDiscover(res, url) {
+  const subject = url.searchParams.get('subject') || ''
+  if (!VALID_SUBJECTS.includes(subject)) {
+    return sendJSON(res, { error: `Invalid subject: ${subject || '(none)'}` }, 400)
+  }
+  let timeoutMs = parseInt(url.searchParams.get('timeout_ms') || '10000', 10)
+  if (!Number.isFinite(timeoutMs)) timeoutMs = 10000
+  timeoutMs = Math.min(Math.max(timeoutMs, 1000), 30000)
+
+  const { discoverPublishers } = require('../replicate/session')
+  const publishers = await discoverPublishers(subject, { timeoutMs, store: getStore() })
+  return sendJSON(res, {
+    subject,
+    timeout_ms: timeoutMs,
+    publishers: publishers.map((p) => ({ ...p, verified: false }))
+  })
+}
+
+/** Discovery: GET /api/publishers[?subject=] -- list the local gossip cache. */
+function handleListPublishers(res, url) {
+  const subject = url.searchParams.get('subject') || null
+  if (subject && !VALID_SUBJECTS.includes(subject)) {
+    return sendJSON(res, { error: `Invalid subject: ${subject}` }, 400)
+  }
+  const { listKnownPublishers } = require('../replicate/discovery')
+  const publishers = listKnownPublishers(getStore(), subject, 200)
+    .map((p) => ({ ...p, verified: false }))
+  return sendJSON(res, { subject, publishers })
 }
 
 async function servePdf(res, paperId) {
@@ -1079,6 +1142,32 @@ function renderHomepage() {
     </div>
 
     <div class="form-section">
+      <h3>Discovered Publishers (gossip)</h3>
+      <p style="color:var(--muted);font-size:0.85em">Ask the discovery swarm who publishes a subject — no out-of-band key exchange needed. Results are unverified hints; "Use" prefills the keys above for fetch-remote.</p>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end">
+        <div>
+          <label for="discover-subject">Subject</label>
+          <select id="discover-subject">
+            <option value="q-bio.GN">q-bio.GN - Genomics</option>
+            <option value="q-bio.QM">q-bio.QM - Quantitative Methods</option>
+            <option value="q-bio.BM">q-bio.BM - Biomolecules</option>
+            <option value="q-bio.CB">q-bio.CB - Cell Behavior</option>
+            <option value="q-bio.MN">q-bio.MN - Molecular Networks</option>
+            <option value="q-bio.PE">q-bio.PE - Populations and Evolution</option>
+            <option value="q-bio.TO">q-bio.TO - Tissues and Organs</option>
+            <option value="cs.LG">cs.LG - Machine Learning</option>
+            <option value="cs.AI">cs.AI - Artificial Intelligence</option>
+            <option value="stat.ML">stat.ML - Machine Learning Stats</option>
+            <option value="stat.AP">stat.AP - Applications</option>
+            <option value="stat.ME">stat.ME - Methodology</option>
+          </select>
+        </div>
+        <button class="btn-sm primary" onclick="doDiscover()">Discover</button>
+      </div>
+      <div id="discover-result" style="margin-top:12px"></div>
+    </div>
+
+    <div class="form-section">
       <h3>Storage Management</h3>
       <label for="evict-mb">Target Max Size (MB)</label>
       <input type="text" id="evict-mb" placeholder="e.g. 500">
@@ -1287,6 +1376,7 @@ function renderHomepage() {
       loadDiskUsage();
       loadHealthReport();
       loadOrcidStatus();
+      loadCachedPublishers();
     }
 
     async function loadNodeStatus() {
@@ -1470,6 +1560,58 @@ function renderHomepage() {
         msg.className = 'form-msg err';
         msg.textContent = 'Error: ' + err.message;
       }
+    }
+
+    // ---- Discovery gossip (GOSSIP_IMPL_PLAN.md M7) ----
+
+    function renderPublisherRows(publishers) {
+      if (!publishers.length) {
+        return '<span class="badge muted">none found</span>';
+      }
+      let html = '<div class="health-list" style="display:block">';
+      for (const p of publishers) {
+        const role = p.is_publisher ? '<span class="badge green">publisher</span>' : '<span class="badge orange">replica/relay</span>';
+        const useBtn = '<button class=\'btn-sm copy-btn\' onclick=\'useDiscoveredPublisher("' + p.bee_key + '", "' + (p.drive_key || '') + '")\'>Use</button>';
+        html += '<div class="health-row">' +
+          '<span>' + role + ' <span style="font-family:monospace;font-size:0.8em">' + escapeHtml(p.bee_key.slice(0, 16)) + '...</span>' +
+          ' <span class="badge muted">' + escapeHtml((p.subjects || []).join(', ')) + '</span></span>' + useBtn + '</div>';
+      }
+      html += '</div>';
+      return html;
+    }
+
+    async function doDiscover() {
+      const subject = document.getElementById('discover-subject').value;
+      const el = document.getElementById('discover-result');
+      el.innerHTML = '<div class="form-msg"><span class="spinner"></span> Listening on the discovery swarm for ' + escapeHtml(subject) + ' (up to 10s)...</div>';
+      try {
+        const resp = await fetch('/api/discover?subject=' + encodeURIComponent(subject) + '&timeout_ms=10000');
+        const data = await resp.json();
+        if (data.error) throw new Error(data.error);
+        el.innerHTML = '<div class="form-msg">Discovered ' + data.publishers.length + ' publisher(s): ' +
+          '<span class="badge muted">unverified until fetch-remote succeeds</span></div>' + renderPublisherRows(data.publishers);
+      } catch (err) {
+        el.innerHTML = '<div class="form-msg err">Error: ' + escapeHtml(err.message) + '</div>';
+      }
+    }
+
+    async function loadCachedPublishers() {
+      const el = document.getElementById('discover-result');
+      if (!el || el.innerHTML !== '') return;
+      try {
+        const resp = await fetch('/api/publishers');
+        const data = await resp.json();
+        if (data.publishers && data.publishers.length) {
+          el.innerHTML = '<div class="form-msg">Cached from previous gossip (' + data.publishers.length + '):</div>' + renderPublisherRows(data.publishers);
+        }
+      } catch (e) {}
+    }
+
+    function useDiscoveredPublisher(beeKey, driveKey) {
+      document.getElementById('fr-bee-key').value = beeKey;
+      if (driveKey) document.getElementById('fr-drive-key').value = driveKey;
+      document.getElementById('fetch-remote-msg').className = 'form-msg ok';
+      document.getElementById('fetch-remote-msg').textContent = 'Keys prefilled from gossip. Review and click Fetch Remote.';
     }
 
     async function doEvict(dryRun) {

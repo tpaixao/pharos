@@ -13,6 +13,42 @@ const { SQLITE_DB_NAME, STORE_DIR, INDEX_DIR, KEY_PREFIX } = require('./constant
 let storeInstance = null
 
 /**
+ * Create the local SQLite tables (shared by publisher and replica stores).
+ *
+ * papers_fts is the local full-text index (never replicated). known_publishers
+ * is the local-only discovery cache written by the gossip engine
+ * (src/replicate/discovery.js, GOSSIP_IMPL_PLAN.md M3): publisher keys learned
+ * on the discovery swarm. Deliberately NOT a Hyperbee table -- it must never
+ * replicate, same category of state as data/remote.json.
+ */
+function initDbTables(db) {
+  db.exec(`
+    CREATE VIRTUAL TABLE IF NOT EXISTS papers_fts USING fts5(
+      paper_id UNINDEXED,
+      title,
+      authors,
+      abstract,
+      fulltext,
+      tokenize = 'porter unicode61'
+    );
+  `)
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS known_publishers (
+      bee_key      TEXT PRIMARY KEY,
+      drive_key    TEXT,
+      subjects     TEXT NOT NULL,
+      is_publisher INTEGER NOT NULL DEFAULT 0,
+      hops         INTEGER NOT NULL DEFAULT 0,
+      announced_at TEXT NOT NULL,
+      first_seen   TEXT NOT NULL,
+      last_seen    TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_known_pub_last_seen
+      ON known_publishers (last_seen);
+  `)
+}
+
+/**
  * Initialize the Pharos storage layer: Corestore (manages all hypercores),
  * Hyperdrive (blobs), Hyperbee (metadata index), and SQLite FTS5 (full-text search).
  *
@@ -41,21 +77,10 @@ async function initStore(dataDir) {
     valueEncoding: 'json'
   })
 
-  // SQLite FTS5 for full-text search
+  // SQLite FTS5 for full-text search + local discovery cache
   const dbPath = path.join(dataDir, SQLITE_DB_NAME)
   const db = new DatabaseSync(dbPath)
-
-  // Create FTS5 table if not exists
-  db.exec(`
-    CREATE VIRTUAL TABLE IF NOT EXISTS papers_fts USING fts5(
-      paper_id UNINDEXED,
-      title,
-      authors,
-      abstract,
-      fulltext,
-      tokenize = 'porter unicode61'
-    );
-  `)
+  initDbTables(db)
 
   // Wait for Hyperdrive and Hyperbee to be ready
   await drive.ready()
@@ -103,24 +128,21 @@ async function initReplicaStore(dataDir, publisherBeeKey, publisherDriveKey) {
     drive = new Hyperdrive(corestore, { name: 'pharos-drive-local' })
   }
 
-  // SQLite for local search
+  // Whether store.drive is the PUBLISHER's drive (vs a fresh local drive
+  // created when no drive key was given). The discovery engine needs this:
+  // a local-only drive key is useless to strangers and must not be gossiped
+  // (GOSSIP_IMPL_PLAN.md, decision D4).
+  const hasPublisherDrive = Boolean(publisherDriveKey)
+
+  // SQLite for local search + local discovery cache
   const dbPath = path.join(dataDir, SQLITE_DB_NAME)
   const db = new DatabaseSync(dbPath)
-  db.exec(`
-    CREATE VIRTUAL TABLE IF NOT EXISTS papers_fts USING fts5(
-      paper_id UNINDEXED,
-      title,
-      authors,
-      abstract,
-      fulltext,
-      tokenize = 'porter unicode61'
-    );
-  `)
+  initDbTables(db)
 
   await drive.ready()
   await bee.ready()
 
-  storeInstance = { drive, bee, db, corestore, dataDir, isReplica: true, close }
+  storeInstance = { drive, bee, db, corestore, dataDir, isReplica: true, hasPublisherDrive, close }
   return storeInstance
 }
 
@@ -300,4 +322,4 @@ async function getBlobSize(drive, blobKey) {
   return 0
 }
 
-module.exports = { initStore, initReplicaStore, getStore, close, getDiskUsage, evictUnpinned }
+module.exports = { initStore, initReplicaStore, getStore, close, getDiskUsage, evictUnpinned, initDbTables }
